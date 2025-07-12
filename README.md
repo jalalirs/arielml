@@ -1,105 +1,98 @@
-Project Summary: Ariel Exoplanet Data Challenge
-This document outlines the problem statement, our current progress, and the architecture of our solution for the "Ariel Data Challenge 2025" competition.
+# ArielML: Exoplanet Data Analysis Pipeline
 
-1. The Problem Statement
-The core objective is to analyze simulated data from the European Space Agency's (ESA) Ariel space telescope to recover the atmospheric transmission spectra of exoplanets.
+This project provides a comprehensive, high-performance Python pipeline for analyzing simulated data from the ESA Ariel Space Telescope, as part of the "Ariel Data Challenge 2025". The primary goal is to process raw time-series image data to recover the atmospheric transmission spectra of exoplanets.
 
-Goal: For each exoplanet, we must predict its spectrum (the amount of starlight its atmosphere blocks at different wavelengths) and our uncertainty for that prediction.
+## ✨ Features
 
-Input Data: We are given raw, time-series image data from two different instruments:
+* **Modular Library (`arielml`):** All core logic is encapsulated in a clean, scalable, and installable Python library.
+* **High-Performance Backend:** A backend-agnostic design allows all numerical operations to run seamlessly on either a **CPU (NumPy)** or a **GPU (CuPy)** for maximum performance.
+* **End-to-End Data Reduction:** Implements the full pipeline from raw data to clean light curves:
+    * Full instrument calibration (ADC, masking, linearity, dark, flat, CDS).
+    * Robust aperture photometry with cosmic ray rejection.
+* **Interactive Visualization Tool:** A powerful GUI built with PyQt6 for interactively exploring the data, visualizing the impact of each processing step, and comparing CPU vs. GPU performance.
 
-AIRS-CH0: A spectrometer that spreads starlight into its constituent colors (wavelengths).
+## 📂 Project Structure
 
-FGS1: A photometer that captures the total brightness of the star in a single spot.
+The project is organized into a clean and logical directory structure:
 
-Core Challenge: The faint signal from the exoplanet's atmosphere is buried in significant noise from the telescope's electronics, cosmic rays, and the natural variability of the host star. Our task is to build a robust pipeline to clean this data and isolate the true signal.
-
-2. Our Approach & Architecture
-We have adopted a professional, modular approach to solve this problem, focusing on scalability, performance, and interpretability.
-
-Modular Library (arielml): All core logic is being built into a custom, installable Python library. This keeps our experimental notebooks clean and ensures code reusability.
-
-Object-Oriented Pipeline: We created a central DataObservation class. An instance of this class represents a single observation (e.g., one planet, one instrument, one visit) and encapsulates all the data and processing logic for it.
-
-High-Performance Backend: The library features a backend-agnostic design that can run all numerical operations on either the CPU (using NumPy) or a GPU (using CuPy). This allows for rapid prototyping on any machine and high-speed processing on GPU-enabled systems.
-
-Interactive Visualization Tool: We built a sophisticated GUI application, the Data Inspector, using PyQt6. This tool is critical for debugging our pipeline, visualizing the effect of each processing step in real-time, and gaining intuition about the data.
-
-3. Current Progress & Implemented Features
-We have successfully completed the entire data reduction phase, from raw images to clean, 1D light curves.
-
-Full Calibration Pipeline: We have implemented a complete, GPU-accelerated calibration pipeline that performs:
-
-ADC Conversion
-
-Hot/Dead Pixel Masking
-
-Vectorized Linearity Correction
-
-Dark Current Subtraction
-
-Correlated Double Sampling (CDS)
-
-Flat Field Correction
-
-Robust Photometry Pipeline: We have implemented an aperture photometry function that:
-
-Handles both instrument types correctly (spectrometer vs. photometer).
-
-Uses sigma clipping to reject outliers both spatially and temporally (cosmic rays).
-
-Extracts clean, background-subtracted 1D light curves for each wavelength.
-
-Data Inspector Tool: Our visualization tool is complete and feature-rich, allowing us to:
-
-Load any observation for any planet.
-
-Select a CPU or GPU backend for processing.
-
-Interactively toggle calibration steps.
-
-Visualize the 2D detector images with photometry apertures overlaid.
-
-Plot the final 1D light curves.
-
-View star/planet metadata and performance logs.
-
-4. Project File Structure
-Our project is organized into the following structure:
-
+```plaintext
 .
-├── arielml/
-│   ├── backend.py
-│   ├── config.py
-│   ├── data/
+├── arielml/            # The core, installable Python library
+│   ├── backend.py      # Handles CPU/GPU backend switching
+│   ├── config.py       # Central configuration for paths and parameters
+│   ├── data/           # Data processing modules
 │   │   ├── calibration.py
-│   │   ├── detrending.py
-│   │   ├── __init__.py
 │   │   ├── loaders.py
 │   │   ├── observation.py
 │   │   └── photometry.py
-│   ├── evaluation/
-│   │   └── ...
-│   ├── __init__.py
-│   ├── models/
-│   │   └── ...
-│   └── pipelines/
-│       └── ...
-├── dataset/
-│   └── (Raw competition data)
-├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_model_prototyping.ipynb
-│   └── submission.ipynb
-├── output/
 │   └── ...
-├── tools/
+├── dataset/            # Target directory for raw competition data
+│   └── .gitkeep
+├── notebooks/          # Jupyter notebooks for experimentation
+├── output/             # Target directory for generated files (models, submissions)
+│   └── .gitkeep
+├── tools/              # Standalone GUI applications
 │   └── data_inspector.py
-└── ... (setup files)
+├── .gitignore          # Specifies files and directories to be ignored by Git
+├── README.md           # This file
+└── requirements.txt    # Project dependencies
+```
 
-5. Next Steps
-With the data cleaning and extraction phase complete, our immediate next steps are to move into the final stages of the analysis:
+## 🚀 Setup and Installation
 
-Detrending: Implement algorithms in arielml/data/detrending.py to remove the remaining systematic noise from our 1D light curves and isolate the exoplanet transit signal.
+Follow these steps to set up the project environment.
 
-Model Building: Begin implementing machine learning models in arielml/models/ to predict the transit depth (the spectrum) from the detrended light curves and associated metadata.
+**1. Clone the Repository:**
+
+```bash
+git clone git@github.com:jalalirs/arielml.git
+cd arielml
+```
+
+**2. Create a Virtual Environment:**
+It is highly recommended to use a virtual environment.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+**3. Install Dependencies:**
+Install all required Python packages from the `requirements.txt` file.
+
+```bash
+pip install -r requirements.txt
+```
+
+*Note: For GPU support, you must have the NVIDIA CUDA Toolkit installed and then install the appropriate version of `cupy`.*
+
+**4. Download the Data:**
+Download the competition data and place it inside the `dataset/` directory. The structure should look like:
+
+```
+dataset/
+├── train/
+├── test/
+├── train.csv
+└── ...
+```
+
+## 🛠️ Usage
+
+### Running the Data Inspector Tool
+
+The primary tool for visualization and debugging is the `Data Inspector`. To run it, execute the following command from the project's root directory:
+
+```bash
+python tools/data_inspector.py
+```
+
+This will launch the GUI, allowing you to load planet data, apply calibration steps, and visualize the results on either the CPU or GPU.
+
+## 🔮 Next Steps
+
+With the data processing foundation now complete, the project will focus on the following machine learning and analysis tasks:
+
+1.  **Detrending:** Implement algorithms to remove systematic noise from the 1D light curves to isolate the exoplanet transit signal.
+2.  **Model Building:** Develop machine learning models to predict the transit depth (the spectrum) from the clean light curves.
+3.  **Pipeline Integration:** Create end-to-end training and prediction pipelines to generate the final competition submission.
