@@ -1,0 +1,117 @@
+# Python
+# ------
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / C extensions
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Usually these files are created by pyinstaller, if you are using it.
+*.manifest
+*.spec
+
+
+# Data & Output
+# -------------
+# Ignore the contents of the dataset directory, but not the directory itself.
+# To make this work, create an empty file named .gitkeep inside the dataset/ folder.
+dataset/*
+!dataset/.gitkeep
+
+# Ignore the contents of the output directory, but not the directory itself.
+# To make this work, create an empty file named .gitkeep inside the output/ folder.
+output/*
+# except the .gitkeep files in this and subfolders
+!output/.gitkeep
+!output/**/.gitkeep
+
+# Ignore temporary data files created during processing.
+/kaggle/tmp/
+
+
+# Jupyter Notebook
+# ----------------
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+
+# IDEs & Editors
+# --------------
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
+
+# PyCharm
+.idea/
+*.iws
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+
+# Operating System Files
+# ----------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+# Other
+# -----
+# Ignore local environment variables
+.env
+.env.*
+
+# Ignore profiling and coverage data
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/

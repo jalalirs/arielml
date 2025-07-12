@@ -1,0 +1,9 @@
+numpy
+pandas
+scikit-learn
+lightgbm
+matplotlib
+seaborn
+jupyter
+pyqt5
+# Add torch or tensorflow if using CNNs 

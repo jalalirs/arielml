@@ -1,0 +1,1 @@
+# (Optional) Abstract base class for all models to inherit from. 
