@@ -9,7 +9,7 @@ sys.path.insert(0, str(project_root))
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
     QPushButton, QSlider, QLabel, QGroupBox, QCheckBox, QSpinBox, QStatusBar,
-    QTextEdit, QTabWidget
+    QTextEdit, QTabWidget, QStackedWidget
 )
 from PyQt6.QtCore import Qt
 
@@ -19,20 +19,20 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-# Import the new object-oriented components
+# Import all necessary components from our library
 from arielml.data.observation import DataObservation
-from arielml.data import loaders
+from arielml.data import loaders, detrending
 from arielml.config import DATASET_DIR, INSTRUMENT_SHAPES, PHOTOMETRY_APERTURES
 from arielml.backend import GPU_ENABLED
 
 class DataInspector(QMainWindow):
     """
     A PyQt GUI application to inspect Ariel dataset files and visualize
-    the full calibration and photometry pipeline using a tabbed interface.
+    the full data reduction pipeline, including detrending.
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ariel Data Inspector (v3.4 Optimized)")
+        self.setWindowTitle("Ariel Data Inspector (v4.0 Detrending)")
         self.setGeometry(100, 100, 1366, 768)
 
         self.observation = None
@@ -78,7 +78,6 @@ class DataInspector(QMainWindow):
 
         frame_group = QGroupBox("Frame Selector")
         frame_layout = QVBoxLayout()
-        # --- FIX: Connect frame slider to image plot update ---
         self.frame_slider = QSlider(Qt.Orientation.Horizontal); self.frame_slider.valueChanged.connect(self.update_image_plot)
         self.frame_spinbox = QSpinBox(); self.frame_spinbox.valueChanged.connect(self.frame_slider.setValue); self.frame_slider.valueChanged.connect(self.frame_spinbox.setValue)
         frame_layout.addWidget(self.frame_slider); frame_layout.addWidget(self.frame_spinbox)
@@ -87,9 +86,8 @@ class DataInspector(QMainWindow):
 
         phot_group = QGroupBox("Photometry")
         phot_layout = QVBoxLayout()
-        # --- FIX: Connect wavelength slider to light curve plot update ---
         self.wavelength_slider = QSlider(Qt.Orientation.Horizontal)
-        self.wavelength_slider.valueChanged.connect(self.update_light_curve_plot)
+        self.wavelength_slider.valueChanged.connect(self.update_all_light_curve_plots)
         self.wavelength_spinbox = QSpinBox()
         self.wavelength_spinbox.valueChanged.connect(self.wavelength_slider.setValue)
         self.wavelength_slider.valueChanged.connect(self.wavelength_spinbox.setValue)
@@ -113,76 +111,118 @@ class DataInspector(QMainWindow):
         calib_group.setLayout(calib_layout)
         layout.addWidget(calib_group)
         
+        # --- NEW: Detrending Controls ---
+        detrend_group = QGroupBox("Detrending Model")
+        detrend_layout = QVBoxLayout()
+        self.detrend_model_combo = QComboBox()
+        self.detrend_model_combo.addItems(["Polynomial", "Savitzky-Golay"])
+        self.detrend_model_combo.currentTextChanged.connect(self.on_detrend_model_change)
+        detrend_layout.addWidget(self.detrend_model_combo)
+        
+        self.detrend_params_stack = QStackedWidget()
+        # Polynomial params
+        poly_widget = QWidget()
+        poly_layout = QHBoxLayout(poly_widget)
+        poly_layout.addWidget(QLabel("Degree:"))
+        self.poly_degree_spinbox = QSpinBox()
+        self.poly_degree_spinbox.setRange(1, 10); self.poly_degree_spinbox.setValue(2)
+        self.poly_degree_spinbox.valueChanged.connect(self.run_pipeline_and_update_plots)
+        poly_layout.addWidget(self.poly_degree_spinbox)
+        self.detrend_params_stack.addWidget(poly_widget)
+        
+        # SavGol params
+        savgol_widget = QWidget()
+        savgol_layout = QHBoxLayout(savgol_widget)
+        savgol_layout.addWidget(QLabel("Window:"))
+        self.savgol_window_spinbox = QSpinBox()
+        self.savgol_window_spinbox.setRange(3, 999); self.savgol_window_spinbox.setSingleStep(2); self.savgol_window_spinbox.setValue(51)
+        self.savgol_window_spinbox.valueChanged.connect(self.run_pipeline_and_update_plots)
+        savgol_layout.addWidget(self.savgol_window_spinbox)
+        savgol_layout.addWidget(QLabel("Order:"))
+        self.savgol_order_spinbox = QSpinBox()
+        self.savgol_order_spinbox.setRange(1, 10); self.savgol_order_spinbox.setValue(2)
+        self.savgol_order_spinbox.valueChanged.connect(self.run_pipeline_and_update_plots)
+        savgol_layout.addWidget(self.savgol_order_spinbox)
+        self.detrend_params_stack.addWidget(savgol_widget)
+        
+        detrend_layout.addWidget(self.detrend_params_stack)
+        detrend_group.setLayout(detrend_layout)
+        layout.addWidget(detrend_group)
+
         layout.addStretch()
         return layout
 
     def create_visuals_panel(self):
         """Creates the right panel with a tabbed interface for all visuals."""
         tabs = QTabWidget()
-        detector_tab = QWidget()
-        detector_layout = QVBoxLayout(detector_tab)
-        info_group = QGroupBox("Star & Planet Info")
-        info_layout_inner = QVBoxLayout()
+        detector_tab = QWidget(); detector_layout = QVBoxLayout(detector_tab)
+        info_group = QGroupBox("Star & Planet Info"); info_layout_inner = QVBoxLayout()
         self.info_display = QTextEdit(); self.info_display.setReadOnly(True)
-        info_group.setFixedHeight(150)
-        info_layout_inner.addWidget(self.info_display)
-        info_group.setLayout(info_layout_inner)
+        info_group.setFixedHeight(150); info_layout_inner.addWidget(self.info_display); info_group.setLayout(info_layout_inner)
         detector_layout.addWidget(info_group)
-        self.image_canvas = FigureCanvas(Figure(figsize=(10, 5)))
-        self.image_ax = self.image_canvas.figure.subplots()
-        self.image_cbar = None
-        detector_layout.addWidget(self.image_canvas)
-        self.image_canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-        photometry_tab = QWidget()
-        photometry_layout = QVBoxLayout(photometry_tab)
-        self.single_lc_canvas = FigureCanvas(Figure(figsize=(10, 3)))
-        self.single_lc_ax = self.single_lc_canvas.figure.subplots()
+        self.image_canvas = FigureCanvas(Figure(figsize=(10, 5))); self.image_ax = self.image_canvas.figure.subplots(); self.image_cbar = None
+        detector_layout.addWidget(self.image_canvas); self.image_canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+        
+        photometry_tab = QWidget(); photometry_layout = QVBoxLayout(photometry_tab)
+        self.single_lc_canvas = FigureCanvas(Figure(figsize=(10, 3))); self.single_lc_ax = self.single_lc_canvas.figure.subplots()
         photometry_layout.addWidget(self.single_lc_canvas)
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
+
+        # --- NEW: Detrended View Tab ---
+        detrended_tab = QWidget()
+        detrended_layout = QVBoxLayout(detrended_tab)
+        self.detrended_lc_canvas = FigureCanvas(Figure(figsize=(10, 3)))
+        self.detrended_lc_ax = self.detrended_lc_canvas.figure.subplots()
+        detrended_layout.addWidget(self.detrended_lc_canvas)
+
+        log_tab = QWidget(); log_layout = QVBoxLayout(log_tab)
         self.log_display = QTextEdit(); self.log_display.setReadOnly(True)
         log_layout.addWidget(self.log_display)
+
         tabs.addTab(detector_tab, "Detector View")
         tabs.addTab(photometry_tab, "Photometry View")
+        tabs.addTab(detrended_tab, "Detrended View")
         tabs.addTab(log_tab, "Performance")
-        main_visuals_layout = QVBoxLayout()
-        main_visuals_layout.addWidget(tabs)
+
+        main_visuals_layout = QVBoxLayout(); main_visuals_layout.addWidget(tabs)
         return main_visuals_layout
 
-    def load_data(self):
-        planet_id_str = self.planet_combo.currentText()
-        instrument = self.instrument_combo.currentText()
-        split = self.split_combo.currentText(); obs_id_str = self.obs_combo.currentText(); backend = self.backend_combo.currentText()
-        if not all([planet_id_str, obs_id_str]): self.status_bar.showMessage("Error: Missing Planet or Observation ID.", 5000); return
-        try:
-            self.status_bar.showMessage(f"Loading data for {planet_id_str} on {backend.upper()}..."); QApplication.processEvents()
-            self.info_display.clear()
-            if self.star_info_df is not None:
-                try:
-                    planet_id_int = int(planet_id_str)
-                    if planet_id_int in self.star_info_df.index: self.info_display.setText(self.star_info_df.loc[planet_id_int].to_string())
-                    else: self.info_display.setText(f"Info not found for planet_id: {planet_id_str}")
-                except (ValueError, KeyError): self.info_display.setText(f"Info not found for planet_id: {planet_id_str}")
-            self.observation = DataObservation(planet_id_str, instrument, int(obs_id_str), split)
-            self.observation.load(backend=backend)
-            self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1)
-            self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
-            self.wavelength_slider.setRange(0, self.observation.raw_signal.shape[2] - 1)
-            self.wavelength_spinbox.setRange(0, self.observation.raw_signal.shape[2] - 1)
-            self.status_bar.showMessage("Data loaded. Running initial calibration...", 5000)
-            self.run_pipeline_and_update_plots()
-        except Exception as e:
-            self.status_bar.showMessage(f"Error loading data: {e}", 5000)
-            self.observation = None
+    def on_detrend_model_change(self, model_name):
+        """Switches the visible parameter widgets for the selected detrending model."""
+        if model_name == "Polynomial":
+            self.detrend_params_stack.setCurrentIndex(0)
+        elif model_name == "Savitzky-Golay":
+            self.detrend_params_stack.setCurrentIndex(1)
+        self.run_pipeline_and_update_plots()
 
     def run_pipeline_and_update_plots(self):
         if not (self.observation and self.observation.is_loaded): return
         steps_to_run = {name: checkbox.isChecked() for name, checkbox in self.calib_checkboxes.items()}
+        
         log_messages = self.observation.run_calibration_pipeline(steps_to_run)
         log_messages = self.observation.run_photometry()
+
+        # --- NEW: Run Detrending ---
+        model_name = self.detrend_model_combo.currentText()
+        if model_name == "Polynomial":
+            degree = self.poly_degree_spinbox.value()
+            detrender = detrending.PolynomialDetrender(degree=degree)
+        elif model_name == "Savitzky-Golay":
+            window = self.savgol_window_spinbox.value()
+            order = self.savgol_order_spinbox.value()
+            detrender = detrending.SavGolDetrender(window_length=window, polyorder=order)
+        else:
+            return # Should not happen
+        
+        log_messages = self.observation.run_detrending(detrender)
+
         self.log_display.setText("\n".join(log_messages))
         self.update_image_plot()
+        self.update_all_light_curve_plots()
+
+    def update_all_light_curve_plots(self):
+        """Updates both the photometry and detrended light curve plots."""
         self.update_light_curve_plot()
+        self.update_detrended_plot()
 
     def update_image_plot(self):
         if not (self.observation and self.observation.is_loaded): return
@@ -224,6 +264,61 @@ class DataInspector(QMainWindow):
             self.single_lc_ax.grid(True, alpha=0.3)
         self.single_lc_canvas.draw()
         
+    def update_detrended_plot(self):
+        """Draws the final detrended light curve and the noise model."""
+        if not (self.observation and self.observation.is_loaded): return
+        
+        detrended_lcs = self.observation.get_detrended_light_curves(return_type='numpy')
+        original_lcs = self.observation.get_light_curves(return_type='numpy')
+        self.detrended_lc_ax.clear()
+
+        if detrended_lcs is not None and original_lcs is not None:
+            wavelength_col = self.wavelength_slider.value()
+            if wavelength_col >= detrended_lcs.shape[1]:
+                wavelength_col = detrended_lcs.shape[1] - 1
+            
+            detrended_lc = detrended_lcs[:, wavelength_col]
+            original_lc = original_lcs[:, wavelength_col]
+            
+            # Calculate the noise model that was divided out
+            noise_model = original_lc / detrended_lc
+            
+            # Plot the original data with the noise model overlaid
+            self.detrended_lc_ax.plot(original_lc, '.', color='grey', alpha=0.2, label='Original Data')
+            self.detrended_lc_ax.plot(noise_model, '-', color='red', alpha=0.6, label='Noise Model')
+            
+            # Plot the final, flattened light curve
+            self.detrended_lc_ax.plot(detrended_lc, '.', color='black', alpha=0.8, label='Detrended Data')
+            
+            self.detrended_lc_ax.axhline(1.0, color='k', linestyle='--', alpha=0.5)
+            self.detrended_lc_ax.set_title(f"Detrended Light Curve for Wavelength Column: {wavelength_col}")
+            self.detrended_lc_ax.set_ylabel("Normalized Flux")
+            self.detrended_lc_ax.legend()
+            self.detrended_lc_ax.grid(True, alpha=0.3)
+        
+        self.detrended_lc_canvas.draw()
+        
+    # --- Unchanged methods ---
+    def load_data(self):
+        planet_id_str = self.planet_combo.currentText(); instrument = self.instrument_combo.currentText(); split = self.split_combo.currentText(); obs_id_str = self.obs_combo.currentText(); backend = self.backend_combo.currentText()
+        if not all([planet_id_str, obs_id_str]): self.status_bar.showMessage("Error: Missing Planet or Observation ID.", 5000); return
+        try:
+            self.status_bar.showMessage(f"Loading data for {planet_id_str} on {backend.upper()}..."); QApplication.processEvents()
+            self.info_display.clear()
+            if self.star_info_df is not None:
+                try:
+                    planet_id_int = int(planet_id_str)
+                    if planet_id_int in self.star_info_df.index: self.info_display.setText(self.star_info_df.loc[planet_id_int].to_string())
+                    else: self.info_display.setText(f"Info not found for planet_id: {planet_id_str}")
+                except (ValueError, KeyError): self.info_display.setText(f"Info not found for planet_id: {planet_id_str}")
+            self.observation = DataObservation(planet_id_str, instrument, int(obs_id_str), split)
+            self.observation.load(backend=backend)
+            self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1); self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
+            self.wavelength_slider.setRange(0, self.observation.raw_signal.shape[2] - 1); self.wavelength_spinbox.setRange(0, self.observation.raw_signal.shape[2] - 1)
+            self.status_bar.showMessage("Data loaded. Running initial pipeline...", 5000)
+            self.run_pipeline_and_update_plots()
+        except Exception as e:
+            self.status_bar.showMessage(f"Error loading data: {e}", 5000); self.observation = None
     def populate_planet_ids(self):
         current_planet = self.planet_combo.currentText(); self.planet_combo.clear(); split = self.split_combo.currentText()
         self.star_info_df = loaders.load_star_info(split)
