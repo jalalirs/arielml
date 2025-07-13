@@ -21,18 +21,28 @@ High-Performance Backend: The library features a backend-agnostic design that ca
 
 Interactive Visualization Tool: We built a sophisticated GUI application, the Data Inspector, using PyQt6 for interactively exploring the data and visualizing the impact of each processing step.
 
-3. Current Progress: Data Reduction Complete
-We have successfully built and debugged the entire data reduction pipeline, from raw images to clean, flattened, and phase-folded light curves. Our arielml library now includes robust, GPU-accelerated modules for:
+3. Current Progress: Advanced Detrending Complete
+We have successfully built and debugged the entire data reduction pipeline. After identifying and fixing critical bugs in the calibration and transit mask calculations, we have moved beyond simple detrending and implemented a suite of advanced, physically-motivated models.
 
-Calibration: Full instrument calibration (ADC, masking, linearity, dark current, CDS, flat fielding).
+Our arielml library now includes a robust, modular detrending framework with the following models:
 
-Photometry: Aperture photometry with spatial and temporal sigma clipping to reject cosmic rays and outliers. The logic correctly handles both spectrometer (AIRS-CH0) and photometer (FGS1) data.
+Baseline Models:
 
-Detrending: A modular detrending framework with Polynomial and Savitzky-Golay models to remove instrumental noise and stellar variability.
+PolynomialDetrender: A simple polynomial fit to the out-of-transit data.
 
-Analysis: A phase-folding and binning module to average out random noise and reveal the final transit signal.
+SavGolDetrender: Uses a Savitzky-Golay filter to smooth the light curve.
 
-Our Data Inspector tool is complete and allows us to visualize every step of this process.
+Advanced Gaussian Process (GP) Models:
+
+GPDetrender: A per-wavelength GP model using the george library for robust CPU-based modeling.
+
+GPyTorchDetrender: A high-performance, per-wavelength GP model built with gpytorch for full GPU acceleration.
+
+Physically-Motivated Hybrid Model:
+
+HybridDetrender: Inspired by winning approaches from previous competitions, this model first isolates and removes the common-mode 1D temporal drift across all wavelengths using a GP (CPU or GPU). It then models the remaining per-wavelength residuals with a simple polynomial. This provides a powerful method for handling shared instrumental noise.
+
+Our Data Inspector tool is complete and allows for the interactive selection and comparison of all these detrending models on both CPU and GPU backends, providing immediate visual feedback on their performance.
 
 4. Project File Structure
 Our project is organized into the following structure:
@@ -171,16 +181,15 @@ Our project is organized into the following structure:
 
 
 5. Next Steps
-With the data processing pipeline complete and validated, we are now ready to move on to the final stage of the project: Machine Learning.
+With a robust and flexible data processing pipeline now validated, we are ready to move on to the final stage of the project: Machine Learning.
 
-The next logical step is to build the models that will take our clean, detrended light curves and predict the final transit spectrum. This involves:
+The next logical steps are to build the models that will take our clean, detrended light curves and predict the final transit spectrum. This involves:
 
-Enhance Detrending Models: Implement a more sophisticated Gaussian Process (GP) model in our detrending framework. This will provide a powerful alternative and allow for robust uncertainty estimation.
+Feature Engineering: Extracting the final transit depths (and their uncertainties) from the light curves produced by our best detrending models (e.g., the HybridDetrender). This will form the feature set for our predictive models.
 
-Feature Engineering: Extracting features from the final light curves (e.g., the transit depth at each wavelength).
-
-Model Implementation: Building our first predictive model (e.g., LightGBM) in the arielml/models/ directory.
+Model Implementation: Building our first predictive models (e.g., LightGBM, a simple MLP) within the arielml/models/ directory.
 
 Custom Loss Function: Creating a custom loss function that directly optimizes for the competition's Gaussian Log-Likelihood (GLL) metric.
 
-Training & Prediction Pipelines: Implementing the end-to-end scripts in arielml/pipelines/ to train our models and generate the submission.csv file.
+Training & Prediction Pipelines: Implementing the end-to-end scripts in arielml/pipelines/ to train our models on the training set and generate the final submission.csv file for the test set.
+

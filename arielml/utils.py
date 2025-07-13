@@ -1,44 +1,51 @@
+# arielml/utils.py
+import numpy as np
 
-def calculate_transit_mask(
-    time_array,
-    period: float,
-    semi_major_axis: float,
-    stellar_radius: float,
-    inclination: float,
-    xp
-) -> "xp.ndarray":
+def calculate_transit_mask(time, period, semi_major_axis, stellar_radius, inclination, xp):
     """
-    Calculates a boolean mask to identify in-transit data points using the
-    specified backend.
-
-    This is a simplified model assuming a circular orbit and a central transit time at t=0
-    for the first transit. A full implementation would use the epoch of transit.
-
+    Calculates a boolean mask identifying the in-transit portions of a light curve.
+    
+    This function uses a standard geometric model of the transit.
+    
     Args:
-        time_array (xp.ndarray): The array of observation times in days.
-        period (float): The orbital period of the planet in days.
-        semi_major_axis (float): The semi-major axis in units of stellar radii.
-        stellar_radius (float): The stellar radius (used for unit consistency).
-        inclination (float): The orbital inclination in degrees.
+        time (xp.ndarray): Array of observation times in days.
+        period (float): Orbital period of the planet in days.
+        semi_major_axis (float): Semi-major axis of the orbit in AU.
+        stellar_radius (float): Radius of the star in solar radii.
+        inclination (float): Orbital inclination in degrees.
         xp (module): The numerical backend (numpy or cupy).
 
     Returns:
-        xp.ndarray: A boolean array, where True indicates an in-transit point.
+        xp.ndarray: A boolean array where True indicates an in-transit data point.
     """
-    # Convert inclination to radians for trigonometric functions
+    # Convert stellar radius from Solar radii to Astronomical Units (AU) for consistency.
+    R_sun_to_AU = 0.00465047
+    stellar_radius_au = stellar_radius * R_sun_to_AU
+
+    # Convert inclination from degrees to radians for trigonometric functions.
     inc_rad = xp.deg2rad(inclination)
 
-    # Calculate transit duration (from Winn, 2010, Eq. 14)
-    transit_duration_days = (period / xp.pi) * xp.arcsin(
-        (1 / semi_major_axis) * xp.sqrt(
-            (1 + 0)**2 - (semi_major_axis * xp.cos(inc_rad))**2
-        ) / xp.sin(inc_rad)
+    # Calculate the full duration of the transit (from first to last contact).
+    # This formula is derived from the geometry of the star-planet system.
+    # See, e.g., Winn (2010), "Transits and Occultations", Eq. 14.
+    # We assume a circular orbit (e=0).
+    transit_duration_days = (period / np.pi) * xp.arcsin(
+        (stellar_radius_au / semi_major_axis) * (1 / xp.sin(inc_rad))
     )
     
-    # Assume the transit center is at t=0 and repeats every `period`.
-    phase = xp.mod(time_array + period / 2, period) - period / 2
+    # Calculate the duration in terms of orbital phase.
+    transit_duration_phase = transit_duration_days / period
 
-    # A point is in-transit if its phase is within half the duration of the center.
-    in_transit_mask = xp.abs(phase) < (transit_duration_days / 2)
+    # Calculate the orbital phase. We assume t0 (mid-transit time) is 0.
+    # The phase is calculated from -0.5 to 0.5 for easier masking around zero.
+    phase = (time / period) % 1.0
+    # Center the phase on 0 by wrapping values > 0.5 to the negative side.
+    phase = xp.where(phase > 0.5, phase - 1.0, phase)
 
+    # The transit is centered at phase 0. We need half the duration for masking.
+    half_duration_phase = transit_duration_phase / 2.0
+    
+    # The mask is True for any point whose absolute phase is within half the transit duration.
+    in_transit_mask = xp.abs(phase) < half_duration_phase
+    
     return in_transit_mask

@@ -6,4 +6,6 @@ matplotlib
 seaborn
 jupyter
 pyqt5
+george
+gpytorch
 # Add torch or tensorflow if using CNNs 

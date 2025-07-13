@@ -9,7 +9,6 @@ def apply_adc_conversion(signal, gain, offset, xp):
 
 def mask_hot_dead_pixels(signal, dead_map, dark_map, xp, sigma=5):
     """Masks dead pixels and hot pixels using the specified backend."""
-    # astropy's sigma_clip works on numpy arrays, so we may need to transfer data
     if hasattr(dark_map, 'get'): # Check if it's a cupy array
         dark_map_np = dark_map.get()
     else:
@@ -22,37 +21,16 @@ def mask_hot_dead_pixels(signal, dead_map, dark_map, xp, sigma=5):
     tiled_hot_mask = xp.tile(hot_pixel_mask, (signal.shape[0], 1, 1))
     
     combined_mask = xp.logical_or(tiled_dead_mask, tiled_hot_mask)
-    # The calling function will be responsible for applying the mask.
     return signal, combined_mask
 
 def apply_linearity_correction(signal, linear_corr_coeffs, xp):
     """
-    Corrects for detector non-linearity using a vectorized polynomial evaluation
-    (Horner's method) that is efficient on both CPU (Numpy) and GPU (Cupy).
-
-    Args:
-        signal (xp.ndarray): The input signal array of shape (F, H, W).
-        linear_corr_coeffs (xp.ndarray): Polynomial coefficients of shape (C, H, W),
-                                         ordered from c0, c1, ..., c_n.
-        xp (module): The numerical backend (numpy or cupy).
-
-    Returns:
-        xp.ndarray: The corrected signal array.
+    Corrects for detector non-linearity using a vectorized polynomial evaluation.
     """
-    # This function implements Horner's method for polynomial evaluation:
-    # y = c0 + x*(c1 + x*(c2 + ... + x*cn))
-    # It is fully vectorized and requires no explicit Python loops over pixels.
-    
     n_coeffs = linear_corr_coeffs.shape[0]
-    
-    # Start with the highest-order coefficient, c_n
-    # The result needs to be broadcastable to the shape of the signal.
     corrected_signal = xp.full_like(signal, linear_corr_coeffs[n_coeffs - 1, :, :])
     
-    # Iteratively apply Horner's method from c_{n-1} down to c0
     for i in range(n_coeffs - 2, -1, -1):
-        # corrected_signal becomes the evaluation of the inner part of the parenthesis
-        # The next step is: new_signal = c_i + x * old_signal
         corrected_signal = linear_corr_coeffs[i, :, :] + signal * corrected_signal
         
     return corrected_signal
@@ -70,6 +48,34 @@ def perform_cds(signal, xp):
         signal = signal[:-1, :, :]
     return signal[1::2, :, :] - signal[::2, :, :]
 
-def apply_flat_field(signal, flat_map, xp):
-    """Corrects for pixel-to-pixel sensitivity variations using the specified backend."""
-    return signal / flat_map
+def apply_flat_field(signal, flat_map, dead_map, xp, epsilon=1e-6):
+    """
+    Corrects for pixel-to-pixel sensitivity variations using the specified backend.
+    Zeros, small values, and dead pixels in the flat_map are clipped.
+    """
+    safe_flat = xp.copy(flat_map)
+
+    # FIX: Use the dead_map to mask the flat field, in addition to checking
+    # for zeros or non-finite values. This is the key insight from the notebook.
+    invalid_mask = (safe_flat < epsilon) | ~xp.isfinite(safe_flat) | dead_map.astype(bool)
+    
+    # Replace these invalid values with NaN so they can be ignored by nanmedian.
+    safe_flat[invalid_mask] = xp.nan
+    
+    # Calculate the median of the remaining, valid flat field values.
+    median_flat = xp.nanmedian(safe_flat)
+    
+    # If the entire flat field was invalid, the median will be NaN.
+    # In this case, use 1.0 as a neutral fallback value.
+    if xp.isnan(median_flat) or median_flat < epsilon:
+        median_flat = 1.0
+        
+    # Replace the NaNs in our safe_flat array with the calculated median.
+    # This ensures that bad pixels in the flat field don't corrupt the signal.
+    safe_flat = xp.nan_to_num(safe_flat, nan=median_flat)
+    
+    # Clip any remaining near-zero values to prevent division issues.
+    safe_flat[safe_flat < epsilon] = median_flat
+
+    # Now it's safe to divide.
+    return signal / safe_flat
