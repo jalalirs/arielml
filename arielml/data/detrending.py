@@ -1,11 +1,13 @@
 # arielml/data/detrending.py
 
+import numpy as np
 from abc import ABC, abstractmethod
+from scipy import signal as scipy_signal
+from typing import Tuple
 
 class BaseDetrender(ABC):
     """
     Abstract base class for all detrending models.
-    Ensures that any new detrender we create has a consistent interface.
     """
     @abstractmethod
     def detrend(
@@ -14,19 +16,14 @@ class BaseDetrender(ABC):
         flux,
         transit_mask,
         xp
-    ) -> "xp.ndarray":
+    ) -> Tuple["xp.ndarray", "xp.ndarray"]:
         """
         Detrends a light curve by modeling and removing systematic noise.
 
-        Args:
-            time (xp.ndarray): The 1D time array for the light curve.
-            flux (xp.ndarray): The 2D flux array of shape (time, wavelengths).
-            transit_mask (xp.ndarray): A 1D boolean mask where True indicates
-                                       an in-transit data point.
-            xp (module): The numerical backend (numpy or cupy).
-
         Returns:
-            xp.ndarray: The flattened, detrended light curve array.
+            A tuple containing:
+            - detrended_flux (xp.ndarray): The flattened, normalized light curve.
+            - noise_model (xp.ndarray): The trend model that was divided out.
         """
         pass
 
@@ -40,26 +37,32 @@ class PolynomialDetrender(BaseDetrender):
             raise ValueError("Degree must be a non-negative integer.")
         self.degree = degree
 
-    def detrend(self, time, flux, transit_mask, xp) -> "xp.ndarray":
+    def detrend(self, time, flux, transit_mask, xp):
         """
         Fits a polynomial to out-of-transit data and divides it out.
-        This operation is vectorized to handle multiple light curves at once.
         """
-        # Create a mask for finite, out-of-transit data points
         finite_mask = xp.all(xp.isfinite(flux), axis=1)
         oot_mask = ~transit_mask & finite_mask
         
         if not xp.any(oot_mask):
-            return flux / xp.nanmedian(flux, axis=0)
+            median_flux = xp.nanmedian(flux, axis=0)
+            return flux / median_flux, xp.full_like(flux, median_flux)
             
-        # Fit polynomials to all light curves (columns) at once
         poly_coeffs = xp.polyfit(time[oot_mask], flux[oot_mask], self.degree)
-        
-        # Evaluate the polynomials over the entire time range
+
+        # --- FIX: Ensure coefficients are 1D for single light curves (like FGS1) ---
+        # cupy.polyval requires a 1D coefficient array.
+        if poly_coeffs.ndim > 1 and poly_coeffs.shape[1] == 1:
+            poly_coeffs = poly_coeffs.squeeze(axis=1)
+
         noise_model = xp.polyval(poly_coeffs, time)
         
+        # For a single light curve, noise_model might be 1D. We need to match flux shape.
+        if noise_model.ndim == 1 and flux.ndim == 2:
+            noise_model = noise_model[:, xp.newaxis]
+
         detrended_flux = flux / noise_model
-        return detrended_flux
+        return detrended_flux, noise_model
 
 class SavGolDetrender(BaseDetrender):
     """
@@ -69,42 +72,52 @@ class SavGolDetrender(BaseDetrender):
     def __init__(self, window_length: int, polyorder: int):
         if window_length % 2 == 0:
             raise ValueError("window_length must be an odd integer.")
+        if polyorder >= window_length:
+            raise ValueError("polyorder must be less than window_length.")
         self.window_length = window_length
         self.polyorder = polyorder
 
-    def detrend(self, time, flux, transit_mask, xp) -> "xp.ndarray":
+    def detrend(self, time, flux, transit_mask, xp):
         """
-        Applies a Savitzky-Golay filter to the out-of-transit data.
+        Applies a Savitzky-Golay filter to the out-of-transit data and
+        interpolates the result to create a full noise model.
         """
-        # Import the correct signal processing library based on the backend
-        if xp.__name__ == 'cupy':
-            from cupyx.scipy import signal
+        is_gpu = (xp.__name__ == 'cupy')
+        if is_gpu:
+            time_np, flux_np, transit_mask_np = time.get(), flux.get(), transit_mask.get()
         else:
-            from scipy import signal
+            time_np, flux_np, transit_mask_np = time, flux, transit_mask
 
-        # Create a copy of the flux to modify
-        trend_flux = xp.copy(flux)
+        noise_model_np = np.full_like(flux_np, np.nan)
         
-        # In-transit data points are not used to build the trend model,
-        # so we replace them with NaN before filtering.
-        trend_flux[transit_mask] = xp.nan
-        
-        # The Sav-Gol filter doesn't handle NaNs, so we must interpolate over them.
-        # This is a simple linear interpolation.
-        for i in range(trend_flux.shape[1]): # Loop over each wavelength
-            lc = trend_flux[:, i]
-            nans = xp.isnan(lc)
-            if xp.any(nans):
-                x = lambda z: z.nonzero()[0]
-                lc[nans] = xp.interp(x(nans), x(~nans), lc[~nans])
-            trend_flux[:, i] = lc
+        for i in range(flux_np.shape[1]):
+            lc = flux_np[:, i]
+            finite_mask = np.isfinite(lc)
+            oot_mask = ~transit_mask_np & finite_mask
+            
+            if np.sum(oot_mask) < self.window_length:
+                if np.any(finite_mask):
+                    median_val = np.nanmedian(lc)
+                else:
+                    median_val = 1.0
+                if np.isnan(median_val): median_val = 1.0
+                noise_model_np[:, i] = median_val
+                continue
 
-        # Apply the filter to the interpolated out-of-transit data
-        noise_model = signal.savgol_filter(
-            trend_flux,
-            window_length=self.window_length,
-            polyorder=self.polyorder,
-            axis=0 # Apply along the time axis
-        )
-        
-        return flux / noise_model
+            oot_time = time_np[oot_mask]
+            oot_flux = lc[oot_mask]
+            
+            smoothed_oot_flux = scipy_signal.savgol_filter(
+                oot_flux,
+                window_length=self.window_length,
+                polyorder=self.polyorder,
+                axis=0
+            )
+            noise_model_np[:, i] = np.interp(time_np, oot_time, smoothed_oot_flux)
+
+        if is_gpu:
+            noise_model = xp.asarray(noise_model_np)
+        else:
+            noise_model = noise_model_np
+            
+        return flux / noise_model, noise_model

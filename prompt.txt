@@ -1,68 +1,38 @@
 Project Summary: Ariel Exoplanet Data Challenge
-This document outlines the problem statement, our current progress, and the architecture of our solution for the "Ariel Data Challenge 2025" competition.
+This document outlines the problem statement, our current progress, and the architecture of our solution for the "Ariel Data Challenge 2025".
 
 1. The Problem Statement
-The core objective is to analyze simulated data from the European Space Agency's (ESA) Ariel space telescope to recover the atmospheric transmission spectra of exoplanets.
+The core objective is to analyze simulated data from the ESA Ariel space telescope to recover the atmospheric transmission spectra of exoplanets.
 
 Goal: For each exoplanet, we must predict its spectrum (the amount of starlight its atmosphere blocks at different wavelengths) and our uncertainty for that prediction.
 
-Input Data: We are given raw, time-series image data from two different instruments:
-
-AIRS-CH0: A spectrometer that spreads starlight into its constituent colors (wavelengths).
-
-FGS1: A photometer that captures the total brightness of the star in a single spot.
+Input Data: We are given raw, time-series image data from two different instruments: AIRS-CH0 (a spectrometer) and FGS1 (a photometer).
 
 Core Challenge: The faint signal from the exoplanet's atmosphere is buried in significant noise from the telescope's electronics, cosmic rays, and the natural variability of the host star. Our task is to build a robust pipeline to clean this data and isolate the true signal.
 
 2. Our Approach & Architecture
 We have adopted a professional, modular approach to solve this problem, focusing on scalability, performance, and interpretability.
 
-Modular Library (arielml): All core logic is being built into a custom, installable Python library. This keeps our experimental notebooks clean and ensures code reusability.
+Modular Library (arielml): All core logic is being built into a custom, installable Python library.
 
-Object-Oriented Pipeline: We created a central DataObservation class. An instance of this class represents a single observation (e.g., one planet, one instrument, one visit) and encapsulates all the data and processing logic for it.
+Object-Oriented Pipeline: We created a central DataObservation class that encapsulates all data and processing logic for a single observation.
 
-High-Performance Backend: The library features a backend-agnostic design that can run all numerical operations on either the CPU (using NumPy) or a GPU (using CuPy). This allows for rapid prototyping on any machine and high-speed processing on GPU-enabled systems.
+High-Performance Backend: The library features a backend-agnostic design that can run all numerical operations on either a CPU (NumPy) or a GPU (CuPy).
 
-Interactive Visualization Tool: We built a sophisticated GUI application, the Data Inspector, using PyQt6. This tool is critical for debugging our pipeline, visualizing the effect of each processing step in real-time, and gaining intuition about the data.
+Interactive Visualization Tool: We built a sophisticated GUI application, the Data Inspector, using PyQt6 for interactively exploring the data and visualizing the impact of each processing step.
 
-3. Current Progress & Implemented Features
-We have successfully completed the entire data reduction phase, from raw images to clean, 1D light curves.
+3. Current Progress: Data Reduction Complete
+We have successfully built and debugged the entire data reduction pipeline, from raw images to clean, flattened, and phase-folded light curves. Our arielml library now includes robust, GPU-accelerated modules for:
 
-Full Calibration Pipeline: We have implemented a complete, GPU-accelerated calibration pipeline that performs:
+Calibration: Full instrument calibration (ADC, masking, linearity, dark current, CDS, flat fielding).
 
-ADC Conversion
+Photometry: Aperture photometry with spatial and temporal sigma clipping to reject cosmic rays and outliers. The logic correctly handles both spectrometer (AIRS-CH0) and photometer (FGS1) data.
 
-Hot/Dead Pixel Masking
+Detrending: A modular detrending framework with Polynomial and Savitzky-Golay models to remove instrumental noise and stellar variability.
 
-Vectorized Linearity Correction
+Analysis: A phase-folding and binning module to average out random noise and reveal the final transit signal.
 
-Dark Current Subtraction
-
-Correlated Double Sampling (CDS)
-
-Flat Field Correction
-
-Robust Photometry Pipeline: We have implemented an aperture photometry function that:
-
-Handles both instrument types correctly (spectrometer vs. photometer).
-
-Uses sigma clipping to reject outliers both spatially and temporally (cosmic rays).
-
-Extracts clean, background-subtracted 1D light curves for each wavelength.
-
-Data Inspector Tool: Our visualization tool is complete and feature-rich, allowing us to:
-
-Load any observation for any planet.
-
-Select a CPU or GPU backend for processing.
-
-Interactively toggle calibration steps.
-
-Visualize the 2D detector images with photometry apertures overlaid.
-
-Plot the final 1D light curves.
-
-View star/planet metadata and performance logs.
+Our Data Inspector tool is complete and allows us to visualize every step of this process.
 
 4. Project File Structure
 Our project is organized into the following structure:
@@ -79,6 +49,7 @@ Our project is organized into the following structure:
 │   ├── loaders.py
 │   ├── observation.py
 │   └── photometry.py
+│   └── analysis.py
 ├── evaluation
 │   ├── __init__.py
 │   └── metrics.py
@@ -198,9 +169,18 @@ Our project is organized into the following structure:
 
 
 
+
 5. Next Steps
-With the data cleaning and extraction phase complete, our immediate next steps are to move into the final stages of the analysis:
+With the data processing pipeline complete and validated, we are now ready to move on to the final stage of the project: Machine Learning.
 
-Detrending: Implement algorithms in arielml/data/detrending.py to remove the remaining systematic noise from our 1D light curves and isolate the exoplanet transit signal.
+The next logical step is to build the models that will take our clean, detrended light curves and predict the final transit spectrum. This involves:
 
-Model Building: Begin implementing machine learning models in arielml/models/ to predict the transit depth (the spectrum) from the detrended light curves and associated metadata.
+Enhance Detrending Models: Implement a more sophisticated Gaussian Process (GP) model in our detrending framework. This will provide a powerful alternative and allow for robust uncertainty estimation.
+
+Feature Engineering: Extracting features from the final light curves (e.g., the transit depth at each wavelength).
+
+Model Implementation: Building our first predictive model (e.g., LightGBM) in the arielml/models/ directory.
+
+Custom Loss Function: Creating a custom loss function that directly optimizes for the competition's Gaussian Log-Likelihood (GLL) metric.
+
+Training & Prediction Pipelines: Implementing the end-to-end scripts in arielml/pipelines/ to train our models and generate the submission.csv file.

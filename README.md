@@ -2,14 +2,16 @@
 
 This project provides a comprehensive, high-performance Python pipeline for analyzing simulated data from the ESA Ariel Space Telescope, as part of the "Ariel Data Challenge 2025". The primary goal is to process raw time-series image data to recover the atmospheric transmission spectra of exoplanets.
 
+---
+
 ## ✨ Features
 
 * **Modular Library (`arielml`):** All core logic is encapsulated in a clean, scalable, and installable Python library.
 * **High-Performance Backend:** A backend-agnostic design allows all numerical operations to run seamlessly on either a **CPU (NumPy)** or a **GPU (CuPy)** for maximum performance.
-* **End-to-End Data Reduction:** Implements the full pipeline from raw data to clean light curves:
-    * Full instrument calibration (ADC, masking, linearity, dark, flat, CDS).
-    * Robust aperture photometry with cosmic ray rejection.
+* **End-to-End Data Reduction:** Implements the full pipeline from raw data to clean, phase-folded light curves, including calibration, photometry, and detrending.
 * **Interactive Visualization Tool:** A powerful GUI built with PyQt6 for interactively exploring the data, visualizing the impact of each processing step, and comparing CPU vs. GPU performance.
+
+---
 
 ## 📂 Project Structure
 
@@ -20,8 +22,11 @@ The project is organized into a clean and logical directory structure:
 ├── arielml/            # The core, installable Python library
 │   ├── backend.py      # Handles CPU/GPU backend switching
 │   ├── config.py       # Central configuration for paths and parameters
+│   ├── utils.py        # Helper functions (e.g., transit mask calculation)
 │   ├── data/           # Data processing modules
+│   │   ├── analysis.py
 │   │   ├── calibration.py
+│   │   ├── detrending.py
 │   │   ├── loaders.py
 │   │   ├── observation.py
 │   │   └── photometry.py
@@ -38,6 +43,8 @@ The project is organized into a clean and logical directory structure:
 └── requirements.txt    # Project dependencies
 ```
 
+---
+
 ## 🚀 Setup and Installation
 
 Follow these steps to set up the project environment.
@@ -45,8 +52,8 @@ Follow these steps to set up the project environment.
 **1. Clone the Repository:**
 
 ```bash
-git clone git@github.com:jalalirs/arielml.git
-cd arielml
+git clone <your-repository-url>
+cd <repository-name>
 ```
 
 **2. Create a Virtual Environment:**
@@ -64,7 +71,7 @@ Install all required Python packages from the `requirements.txt` file.
 pip install -r requirements.txt
 ```
 
-*Note: For GPU support, you must have the NVIDIA CUDA Toolkit installed and then install the appropriate version of `cupy`.*
+*Note: For GPU support, you must have the NVIDIA CUDA Toolkit installed and then install the appropriate version of `cupy`. For the Gaussian Process model, you may need to install additional libraries like `george` or `celerite`.*
 
 **4. Download the Data:**
 Download the competition data and place it inside the `dataset/` directory. The structure should look like:
@@ -77,6 +84,8 @@ dataset/
 └── ...
 ```
 
+---
+
 ## 🛠️ Usage
 
 ### Running the Data Inspector Tool
@@ -87,12 +96,15 @@ The primary tool for visualization and debugging is the `Data Inspector`. To run
 python tools/data_inspector.py
 ```
 
-This will launch the GUI, allowing you to load planet data, apply calibration steps, and visualize the results on either the CPU or GPU.
+This will launch the GUI, allowing you to load planet data, apply calibration steps, detrend the light curves with different models, and visualize the final phase-folded transit signal.
+
+---
 
 ## 🔮 Next Steps
 
 With the data processing foundation now complete, the project will focus on the following machine learning and analysis tasks:
 
-1.  **Detrending:** Implement algorithms to remove systematic noise from the 1D light curves to isolate the exoplanet transit signal.
-2.  **Model Building:** Develop machine learning models to predict the transit depth (the spectrum) from the clean light curves.
-3.  **Pipeline Integration:** Create end-to-end training and prediction pipelines to generate the final competition submission.
+1.  **Enhance Detrending Models:** Implement a more sophisticated **Gaussian Process (GP)** model in our detrending framework. This is the gold standard for this type of time-series analysis and will provide a powerful alternative for noise modeling and robust uncertainty estimation, which is critical for the competition's GLL metric.
+2.  **Feature Engineering:** Extract features from the final light curves (e.g., the transit depth at each wavelength).
+3.  **Model Building:** Develop machine learning models to predict the transit depth (the spectrum) from the clean light curves.
+4.  **Pipeline Integration:** Create end-to-end training and prediction pipelines to generate the final competition submission.
