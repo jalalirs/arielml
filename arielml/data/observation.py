@@ -114,25 +114,19 @@ class DataObservation:
             mask_method (str): The method to use for generating the transit mask 
                                ('empirical' or 'physical').
         """
-        print(f"DEBUG: Starting detrending with {detrender.__class__.__name__}")
-        
         if self.light_curves is None:
             raise RuntimeError("Photometry must be run before detrending.")
         
-        print("DEBUG: Getting time array...")
         time_array_xp = self.xp.asarray(self.get_time_array())
         
-        print(f"DEBUG: Getting transit mask with method: {mask_method}")
         # FIX: Use the mask_method passed from the UI
         transit_mask = self.get_transit_mask(method=mask_method)
         
-        print("DEBUG: Running detrender.detrend()...")
         detrended_lcs, noise_models = self._apply_timed_step(
             detrender.detrend, time_array_xp, self.light_curves, transit_mask, 
             step_name=f"Detrending ({detrender.__class__.__name__})", xp=self.xp
         )
         
-        print("DEBUG: Detrending completed, storing results...")
         self.detrended_light_curves = detrended_lcs
         self.noise_models = noise_models
         return self.calibration_log

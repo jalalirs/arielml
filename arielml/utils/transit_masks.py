@@ -46,45 +46,36 @@ def find_transit_mask_empirical(time, flux, Navg=250, Noffset=150, fit_order=5, 
     Returns:
         xp.ndarray: A boolean array where True indicates an in-transit data point.
     """
-    print("DEBUG: find_transit_mask_empirical() called")
-    print(f"DEBUG: Input shapes - time: {time.shape}, flux: {flux.shape}")
-    
     # This function must run on the CPU with NumPy due to polyfit and cumsum.
     is_gpu = (xp.__name__ == 'cupy')
     if is_gpu:
-        print("DEBUG: Converting GPU arrays to CPU")
         flux_np = flux.get()
         time_np = time.get()
     else:
         flux_np = flux
         time_np = time
 
-    print("DEBUG: Starting moving average smoothing...")
     # --- 1. Smooth the light curve with a moving average ---
     # The cumsum trick is a fast way to implement a moving average.
     ret = np.cumsum(flux_np, dtype=float)
     ret[Navg:] = ret[Navg:] - ret[:-Navg]
     data_smoothed = ret[Navg - 1:] / Navg
     
-    print("DEBUG: Starting polynomial detrending...")
     # --- 2. Detrend the smoothed curve with a polynomial ---
     x_smooth = np.arange(len(data_smoothed))
     try:
         poly_coeffs = np.polyfit(x_smooth, data_smoothed, fit_order)
     except np.linalg.LinAlgError:
         # If the polynomial fit fails, fall back to a lower order.
-        print("DEBUG: Polynomial fit failed, falling back to order 1")
         poly_coeffs = np.polyfit(x_smooth, data_smoothed, 1)
         
     poly_fit = np.poly1d(poly_coeffs)
     data_detrended = data_smoothed - poly_fit(x_smooth)
     
-    print("DEBUG: Finding derivative...")
     # --- 3. Find the derivative by shifting and subtracting ---
     # This finds where the slope changes most dramatically.
     diff = data_detrended[Noffset:] - data_detrended[:-Noffset]
     
-    print("DEBUG: Finding ingress/egress...")
     # --- 4. Find ingress/egress and create the mask ---
     # Find the index of the minimum (steepest drop) and maximum (steepest rise).
     # Add offsets to account for the smoothing and differencing windows.
@@ -95,14 +86,9 @@ def find_transit_mask_empirical(time, flux, Navg=250, Noffset=150, fit_order=5, 
     if idx_ingress > idx_egress:
         idx_ingress, idx_egress = idx_egress, idx_ingress
 
-    print(f"DEBUG: Ingress at {idx_ingress}, egress at {idx_egress}")
-    
     # Create a boolean mask that is True between ingress and egress
     mask_np = np.zeros_like(time_np, dtype=bool)
     mask_np[idx_ingress:idx_egress] = True
     
-    print("DEBUG: Converting back to original backend...")
     # Convert back to a GPU array if necessary
-    result = xp.asarray(mask_np) if is_gpu else mask_np
-    print("DEBUG: find_transit_mask_empirical() completed")
-    return result 
+    return xp.asarray(mask_np) if is_gpu else mask_np 

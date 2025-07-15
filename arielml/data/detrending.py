@@ -36,15 +36,12 @@ class BaseDetrender(Observable, ABC):
 class PolynomialDetrender(BaseDetrender):
     """Fits and removes a polynomial trend."""
     def __init__(self, degree: int = 2):
+        super().__init__()
         self.degree = degree
 
     def detrend(self, time, flux, transit_mask, xp):
-        print(f"DEBUG: PolynomialDetrender.detrend() called with degree={self.degree}")
-        print(f"DEBUG: Input shapes - time: {time.shape}, flux: {flux.shape}, transit_mask: {transit_mask.shape}")
-        
         noise_model = xp.full_like(flux, xp.nan)
         for i in range(flux.shape[1]):
-            print(f"DEBUG: Processing wavelength channel {i+1}/{flux.shape[1]}")
             lc, finite_mask = flux[:, i], xp.isfinite(flux[:, i])
             oot_mask = ~transit_mask & finite_mask
             if xp.sum(oot_mask) < self.degree + 1:
@@ -52,12 +49,12 @@ class PolynomialDetrender(BaseDetrender):
             poly_coeffs = xp.polyfit(time[oot_mask], lc[oot_mask], self.degree)
             noise_model[:, i] = xp.polyval(poly_coeffs, time)
         
-        print("DEBUG: PolynomialDetrender.detrend() completed")
         return flux / noise_model, noise_model
 
 class SavGolDetrender(BaseDetrender):
     """Uses a Savitzky-Golay filter to smooth the data."""
     def __init__(self, window_length: int, polyorder: int):
+        super().__init__()
         self.window_length, self.polyorder = window_length, polyorder
 
     def detrend(self, time, flux, transit_mask, xp):

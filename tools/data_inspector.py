@@ -127,7 +127,7 @@ class PipelineWorker(QThread):
                 self.check_stop()
                 
                 # Connect the detrender's progress signals to our signal
-                if hasattr(self.detrender, 'add_observer'):
+                if hasattr(self.detrender, 'add_observer') and hasattr(self.detrender, '_observers'):
                     self.detrender.add_observer(self._on_detrending_progress)
                 
                 # Run the detrending
@@ -135,7 +135,7 @@ class PipelineWorker(QThread):
                 print("DEBUG: Detrending completed")
                 
                 # Clean up observer
-                if hasattr(self.detrender, 'remove_observer'):
+                if hasattr(self.detrender, 'remove_observer') and hasattr(self.detrender, '_observers'):
                     self.detrender.remove_observer(self._on_detrending_progress)
             else:
                 print("DEBUG: No detrender provided, skipping detrending")
