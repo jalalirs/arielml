@@ -637,15 +637,15 @@ class DataInspector(QMainWindow):
         # Update status bar
         self.statusBar().showMessage(message, 1000)
         
-        # Update progress bar based on message
+        # Update progress bar based on message (starting from 25% where loading left off)
         if "calibration" in message.lower():
-            self.progress_bar.setValue(25)
+            self.progress_bar.setValue(30)
         elif "photometry" in message.lower():
-            self.progress_bar.setValue(50)
+            self.progress_bar.setValue(45)
         elif "detrending" in message.lower():
-            self.progress_bar.setValue(75)
+            self.progress_bar.setValue(70)
         elif "phase folding" in message.lower():
-            self.progress_bar.setValue(90)
+            self.progress_bar.setValue(85)
     
     def _on_pipeline_finished(self):
         """Handle completion of the pipeline."""
@@ -693,8 +693,9 @@ class DataInspector(QMainWindow):
     
     def _on_detrending_progress(self, progress: DetrendingProgress):
         """Handle progress updates from the detrender."""
-        # Update progress bar
-        self.progress_bar.setValue(int(progress.progress * 100))
+        # Update progress bar (detrending is 70-85% of total progress)
+        detrending_progress = 70 + int(progress.progress * 15)
+        self.progress_bar.setValue(detrending_progress)
         
         # Update status message
         message = progress.message
@@ -709,14 +710,14 @@ class DataInspector(QMainWindow):
         """Handle completion of detrending."""
         try:
             # Update progress for phase folding
-            self.progress_bar.setValue(80)
+            self.progress_bar.setValue(85)
             self.progress_label.setText("Running phase folding...")
             
             # Run phase folding
             self.observation.run_phase_folding(n_bins=self.bins_spinbox.value())
             
             # Update progress for plotting
-            self.progress_bar.setValue(90)
+            self.progress_bar.setValue(95)
             self.progress_label.setText("Updating plots...")
             
             # Update plots
@@ -768,8 +769,7 @@ class DataInspector(QMainWindow):
             self.progress_label.setVisible(True)
             self.stop_button.setVisible(True)
             
-            # Reset progress
-            self.progress_bar.setValue(0)
+            # Don't reset progress - let the worker thread manage it
             self.progress_label.setText(f"Starting {operation}...")
             
         else:
@@ -1080,7 +1080,15 @@ class DataInspector(QMainWindow):
         """Handle progress updates from data loading."""
         self.progress_label.setText(message)
         self.statusBar().showMessage(message, 1000)
-        self.progress_bar.setValue(50)  # Simple progress for loading
+        # Use a more gradual progress for loading (0-25%)
+        if "Loading" in message:
+            self.progress_bar.setValue(10)
+        elif "Calibrating" in message:
+            self.progress_bar.setValue(15)
+        elif "Photometry" in message:
+            self.progress_bar.setValue(20)
+        else:
+            self.progress_bar.setValue(25)  # Final loading step
     
     def _on_loading_finished(self, observation):
         """Handle completion of data loading."""
