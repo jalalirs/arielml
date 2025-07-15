@@ -227,108 +227,108 @@ class DataInspector(QMainWindow):
         # Advanced GP (2-Step) parameters
         # Multi-Kernel GP parameters  
         # Transit Window GP parameters
-            
-            # AIRS Drift parameters
-            airs_widget = QWidget()
-            airs_layout = QVBoxLayout(airs_widget)
-            
-            # Average drift parameters
-            avg_layout = QHBoxLayout()
-            avg_layout.addWidget(QLabel("Avg Kernel:"))
-            self.airs_avg_kernel_combo = QComboBox()
-            self.airs_avg_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
-            avg_layout.addWidget(self.airs_avg_kernel_combo)
-            avg_layout.addWidget(QLabel("Length Scale:"))
-            self.airs_avg_length_spinbox = QDoubleSpinBox()
-            self.airs_avg_length_spinbox.setRange(0.1, 10.0)
-            self.airs_avg_length_spinbox.setValue(1.0)
-            self.airs_avg_length_spinbox.setSingleStep(0.1)
-            avg_layout.addWidget(self.airs_avg_length_spinbox)
-            airs_layout.addLayout(avg_layout)
-            
-            # Spectral drift parameters
-            spec_layout = QHBoxLayout()
-            spec_layout.addWidget(QLabel("Spectral Kernel:"))
-            self.airs_spec_kernel_combo = QComboBox()
-            self.airs_spec_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
-            spec_layout.addWidget(self.airs_spec_kernel_combo)
-            spec_layout.addWidget(QLabel("Time Scale:"))
-            self.airs_time_scale_spinbox = QDoubleSpinBox()
-            self.airs_time_scale_spinbox.setRange(0.1, 10.0)
-            self.airs_time_scale_spinbox.setValue(0.4)
-            self.airs_time_scale_spinbox.setSingleStep(0.1)
-            spec_layout.addWidget(self.airs_time_scale_spinbox)
-            spec_layout.addWidget(QLabel("Wavelength Scale:"))
-            self.airs_wl_scale_spinbox = QDoubleSpinBox()
-            self.airs_wl_scale_spinbox.setRange(0.01, 1.0)
-            self.airs_wl_scale_spinbox.setValue(0.05)
-            self.airs_wl_scale_spinbox.setSingleStep(0.01)
-            spec_layout.addWidget(self.airs_wl_scale_spinbox)
-            airs_layout.addLayout(spec_layout)
-            
-            # Sparse approximation
-            sparse_layout = QHBoxLayout()
-            self.airs_sparse_checkbox = QCheckBox("Use Sparse Approximation")
-            self.airs_sparse_checkbox.setChecked(True)
-            sparse_layout.addWidget(self.airs_sparse_checkbox)
-            airs_layout.addLayout(sparse_layout)
-            
-            self.model_widget_map["AIRS Drift (CPU)"] = self.detrend_params_stack.addWidget(airs_widget)
-            if GP_GPU_ENABLED:
-                self.model_widget_map["AIRS Drift (GPU)"] = self.detrend_params_stack.indexOf(airs_widget)
-            
-            # FGS Drift parameters
-            fgs_widget = QWidget()
-            fgs_layout = QHBoxLayout(fgs_widget)
-            fgs_layout.addWidget(QLabel("Kernel:"))
-            self.fgs_kernel_combo = QComboBox()
-            self.fgs_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
-            fgs_layout.addWidget(self.fgs_kernel_combo)
-            fgs_layout.addWidget(QLabel("Length Scale:"))
-            self.fgs_length_spinbox = QDoubleSpinBox()
-            self.fgs_length_spinbox.setRange(0.1, 10.0)
-            self.fgs_length_spinbox.setValue(1.0)
-            self.fgs_length_spinbox.setSingleStep(0.1)
-            fgs_layout.addWidget(self.fgs_length_spinbox)
-            
-            self.model_widget_map["FGS Drift (CPU)"] = self.detrend_params_stack.addWidget(fgs_widget)
-            if GP_GPU_ENABLED:
-                self.model_widget_map["FGS Drift (GPU)"] = self.detrend_params_stack.indexOf(fgs_widget)
-            
-            # Bayesian Multi-Component parameters
-            bayesian_widget = QWidget()
-            bayesian_layout = QVBoxLayout(bayesian_widget)
-            
-            # PCA components
-            pca_layout = QHBoxLayout()
-            pca_layout.addWidget(QLabel("PCA Components:"))
-            self.bayesian_pca_spinbox = QSpinBox()
-            self.bayesian_pca_spinbox.setRange(0, 5)
-            self.bayesian_pca_spinbox.setValue(1)
-            pca_layout.addWidget(self.bayesian_pca_spinbox)
-            bayesian_layout.addLayout(pca_layout)
-            
-            # Iterations
-            iter_layout = QHBoxLayout()
-            iter_layout.addWidget(QLabel("Iterations:"))
-            self.bayesian_iter_spinbox = QSpinBox()
-            self.bayesian_iter_spinbox.setRange(1, 20)
-            self.bayesian_iter_spinbox.setValue(7)
-            iter_layout.addWidget(self.bayesian_iter_spinbox)
-            bayesian_layout.addLayout(iter_layout)
-            
-            # Samples
-            samples_layout = QHBoxLayout()
-            samples_layout.addWidget(QLabel("Samples:"))
-            self.bayesian_samples_spinbox = QSpinBox()
-            self.bayesian_samples_spinbox.setRange(10, 1000)
-            self.bayesian_samples_spinbox.setValue(100)
-            samples_layout.addWidget(self.bayesian_samples_spinbox)
-            bayesian_layout.addLayout(samples_layout)
-            
-            self.model_widget_map["Bayesian Multi-Component (CPU)"] = self.detrend_params_stack.addWidget(bayesian_widget)
-            if GP_GPU_ENABLED:
-                self.model_widget_map["Bayesian Multi-Component (GPU)"] = self.detrend_params_stack.indexOf(bayesian_widget)
+        
+        # AIRS Drift parameters
+        airs_widget = QWidget()
+        airs_layout = QVBoxLayout(airs_widget)
+        
+        # Average drift parameters
+        avg_layout = QHBoxLayout()
+        avg_layout.addWidget(QLabel("Avg Kernel:"))
+        self.airs_avg_kernel_combo = QComboBox()
+        self.airs_avg_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
+        avg_layout.addWidget(self.airs_avg_kernel_combo)
+        avg_layout.addWidget(QLabel("Length Scale:"))
+        self.airs_avg_length_spinbox = QDoubleSpinBox()
+        self.airs_avg_length_spinbox.setRange(0.1, 10.0)
+        self.airs_avg_length_spinbox.setValue(1.0)
+        self.airs_avg_length_spinbox.setSingleStep(0.1)
+        avg_layout.addWidget(self.airs_avg_length_spinbox)
+        airs_layout.addLayout(avg_layout)
+        
+        # Spectral drift parameters
+        spec_layout = QHBoxLayout()
+        spec_layout.addWidget(QLabel("Spectral Kernel:"))
+        self.airs_spec_kernel_combo = QComboBox()
+        self.airs_spec_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
+        spec_layout.addWidget(self.airs_spec_kernel_combo)
+        spec_layout.addWidget(QLabel("Time Scale:"))
+        self.airs_time_scale_spinbox = QDoubleSpinBox()
+        self.airs_time_scale_spinbox.setRange(0.1, 10.0)
+        self.airs_time_scale_spinbox.setValue(0.4)
+        self.airs_time_scale_spinbox.setSingleStep(0.1)
+        spec_layout.addWidget(self.airs_time_scale_spinbox)
+        spec_layout.addWidget(QLabel("Wavelength Scale:"))
+        self.airs_wl_scale_spinbox = QDoubleSpinBox()
+        self.airs_wl_scale_spinbox.setRange(0.01, 1.0)
+        self.airs_wl_scale_spinbox.setValue(0.05)
+        self.airs_wl_scale_spinbox.setSingleStep(0.01)
+        spec_layout.addWidget(self.airs_wl_scale_spinbox)
+        airs_layout.addLayout(spec_layout)
+        
+        # Sparse approximation
+        sparse_layout = QHBoxLayout()
+        self.airs_sparse_checkbox = QCheckBox("Use Sparse Approximation")
+        self.airs_sparse_checkbox.setChecked(True)
+        sparse_layout.addWidget(self.airs_sparse_checkbox)
+        airs_layout.addLayout(sparse_layout)
+        
+        self.model_widget_map["AIRS Drift (CPU)"] = self.detrend_params_stack.addWidget(airs_widget)
+        if GP_GPU_ENABLED:
+            self.model_widget_map["AIRS Drift (GPU)"] = self.detrend_params_stack.indexOf(airs_widget)
+        
+        # FGS Drift parameters
+        fgs_widget = QWidget()
+        fgs_layout = QHBoxLayout(fgs_widget)
+        fgs_layout.addWidget(QLabel("Kernel:"))
+        self.fgs_kernel_combo = QComboBox()
+        self.fgs_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
+        fgs_layout.addWidget(self.fgs_kernel_combo)
+        fgs_layout.addWidget(QLabel("Length Scale:"))
+        self.fgs_length_spinbox = QDoubleSpinBox()
+        self.fgs_length_spinbox.setRange(0.1, 10.0)
+        self.fgs_length_spinbox.setValue(1.0)
+        self.fgs_length_spinbox.setSingleStep(0.1)
+        fgs_layout.addWidget(self.fgs_length_spinbox)
+        
+        self.model_widget_map["FGS Drift (CPU)"] = self.detrend_params_stack.addWidget(fgs_widget)
+        if GP_GPU_ENABLED:
+            self.model_widget_map["FGS Drift (GPU)"] = self.detrend_params_stack.indexOf(fgs_widget)
+        
+        # Bayesian Multi-Component parameters
+        bayesian_widget = QWidget()
+        bayesian_layout = QVBoxLayout(bayesian_widget)
+        
+        # PCA components
+        pca_layout = QHBoxLayout()
+        pca_layout.addWidget(QLabel("PCA Components:"))
+        self.bayesian_pca_spinbox = QSpinBox()
+        self.bayesian_pca_spinbox.setRange(0, 5)
+        self.bayesian_pca_spinbox.setValue(1)
+        pca_layout.addWidget(self.bayesian_pca_spinbox)
+        bayesian_layout.addLayout(pca_layout)
+        
+        # Iterations
+        iter_layout = QHBoxLayout()
+        iter_layout.addWidget(QLabel("Iterations:"))
+        self.bayesian_iter_spinbox = QSpinBox()
+        self.bayesian_iter_spinbox.setRange(1, 20)
+        self.bayesian_iter_spinbox.setValue(7)
+        iter_layout.addWidget(self.bayesian_iter_spinbox)
+        bayesian_layout.addLayout(iter_layout)
+        
+        # Samples
+        samples_layout = QHBoxLayout()
+        samples_layout.addWidget(QLabel("Samples:"))
+        self.bayesian_samples_spinbox = QSpinBox()
+        self.bayesian_samples_spinbox.setRange(10, 1000)
+        self.bayesian_samples_spinbox.setValue(100)
+        samples_layout.addWidget(self.bayesian_samples_spinbox)
+        bayesian_layout.addLayout(samples_layout)
+        
+        self.model_widget_map["Bayesian Multi-Component (CPU)"] = self.detrend_params_stack.addWidget(bayesian_widget)
+        if GP_GPU_ENABLED:
+            self.model_widget_map["Bayesian Multi-Component (GPU)"] = self.detrend_params_stack.indexOf(bayesian_widget)
 
         layout.addWidget(self.detrend_params_stack)
         detrend_group.setLayout(layout)
