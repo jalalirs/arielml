@@ -8,7 +8,7 @@ sys.path.insert(0, str(project_root))
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
     QPushButton, QSlider, QLabel, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, QStatusBar,
-    QTextEdit, QTabWidget, QStackedWidget
+    QTextEdit, QTabWidget, QStackedWidget, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
