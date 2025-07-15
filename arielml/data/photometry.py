@@ -67,7 +67,13 @@ def extract_aperture_photometry(
         print(f"NaNs in raw_flux for channel 0 (after fix): {xp.sum(xp.isnan(raw_flux[:, 0]))}")
 
         num_pixels_in_aperture = sig_y_end - sig_y_start + 1
-        background_contribution = median_background_per_pixel.squeeze(axis=1) * num_pixels_in_aperture
+        
+        # FIX: Properly handle background contribution dimensions for AIRS-CH0
+        # median_background_per_pixel has shape (n_frames, 1, 1) for AIRS-CH0
+        # We need to broadcast it to match raw_flux shape (n_frames, n_wavelengths)
+        background_per_pixel = median_background_per_pixel.squeeze()  # Shape: (n_frames,)
+        background_contribution = background_per_pixel[:, xp.newaxis] * num_pixels_in_aperture  # Shape: (n_frames, 1)
+        
         light_curves_with_outliers = raw_flux - background_contribution
 
     # --- 4. Final Temporal Outlier Rejection ---
