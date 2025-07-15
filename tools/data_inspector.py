@@ -107,6 +107,7 @@ class DataInspector(QMainWindow):
         self.backend_combo.addItems(["cpu", "gpu"])
         if not GPU_ENABLED:
             self.backend_combo.model().item(1).setEnabled(False)
+        self.backend_combo.currentTextChanged.connect(self.update_detrending_options)
 
         self.load_button = QPushButton("Load Planet Data")
         self.load_button.clicked.connect(self.load_data)
@@ -147,61 +148,11 @@ class DataInspector(QMainWindow):
         
         # --- Dropdown for model selection ---
         self.detrend_model_combo = QComboBox()
-        
-        # Build detrending options based on available backends
-        detrend_options = []
-        
-        # Always available (CPU)
-        detrend_options.extend([
-            "Polynomial",
-            "Savitzky-Golay", 
-            "GP (george CPU) ⚠️ Very Slow",
-            "Hybrid GP (CPU)"
-        ])
-        
-        # GPU options (if available)
-        if GP_GPU_ENABLED: 
-            detrend_options.extend([
-                "GP (GPyTorch GPU)",
-                "Hybrid GP (GPU)"
-            ])
-        else:
-            detrend_options.extend([
-                "GP (GPyTorch GPU) ❌ Not Implemented",
-                "Hybrid GP (GPU) ❌ Not Implemented"
-            ])
-        
-        # Advanced models (if sklearn available)
-        if SKLEARN_GP_ENABLED:
-            detrend_options.extend([
-                "Advanced GP (2-Step)",
-                "Multi-Kernel GP", 
-                "Transit Window GP"
-            ])
-        
-        # ariel_gp-style models
-        detrend_options.extend([
-            "AIRS Drift (CPU)",
-            "FGS Drift (CPU)", 
-            "Bayesian Multi-Component (CPU)"
-        ])
-        
-        if GP_GPU_ENABLED:
-            detrend_options.extend([
-                "AIRS Drift (GPU)",
-                "FGS Drift (GPU)",
-                "Bayesian Multi-Component (GPU)"
-            ])
-        else:
-            detrend_options.extend([
-                "AIRS Drift (GPU) ❌ Not Implemented",
-                "FGS Drift (GPU) ❌ Not Implemented", 
-                "Bayesian Multi-Component (GPU) ❌ Not Implemented"
-            ])
-        
-        self.detrend_model_combo.addItems(detrend_options)
         self.detrend_model_combo.currentTextChanged.connect(self.on_detrend_model_change)
         layout.addWidget(self.detrend_model_combo)
+        
+        # Initialize with CPU options (will be updated when backend changes)
+        self.update_detrending_options()
 
         # --- Stacked widget for model parameters ---
         self.detrend_params_stack = QStackedWidget()
@@ -753,6 +704,70 @@ class DataInspector(QMainWindow):
         if not planet_dir.exists(): return
         obs_ids = sorted([f.stem.split('_')[-1] for f in planet_dir.glob(f"{self.instrument_combo.currentText()}_signal_*.parquet") if f.stem.split('_')[-1].isdigit()], key=int)
         if obs_ids: self.obs_combo.addItems(obs_ids)
+    def update_detrending_options(self):
+        """Update the detrending dropdown based on the selected backend."""
+        current_backend = self.backend_combo.currentText()
+        
+        # Clear current options
+        self.detrend_model_combo.clear()
+        
+        # Build detrending options based on selected backend
+        detrend_options = []
+        
+        if current_backend == "cpu":
+            # CPU-only options
+            detrend_options.extend([
+                "Polynomial",
+                "Savitzky-Golay", 
+                "GP (george CPU) ⚠️ Very Slow",
+                "Hybrid GP (CPU)"
+            ])
+            
+            # Advanced models (if sklearn available)
+            if SKLEARN_GP_ENABLED:
+                detrend_options.extend([
+                    "Advanced GP (2-Step)",
+                    "Multi-Kernel GP", 
+                    "Transit Window GP"
+                ])
+            
+            # ariel_gp-style models (CPU)
+            detrend_options.extend([
+                "AIRS Drift (CPU)",
+                "FGS Drift (CPU)", 
+                "Bayesian Multi-Component (CPU)"
+            ])
+            
+        elif current_backend == "gpu":
+            # GPU-only options (if available)
+            if GP_GPU_ENABLED:
+                detrend_options.extend([
+                    "GP (GPyTorch GPU)",
+                    "Hybrid GP (GPU)"
+                ])
+                
+                # ariel_gp-style models (GPU)
+                detrend_options.extend([
+                    "AIRS Drift (GPU)",
+                    "FGS Drift (GPU)",
+                    "Bayesian Multi-Component (GPU)"
+                ])
+            else:
+                # Show not implemented options when GPU is not available
+                detrend_options.extend([
+                    "GP (GPyTorch GPU) ❌ Not Implemented",
+                    "Hybrid GP (GPU) ❌ Not Implemented",
+                    "AIRS Drift (GPU) ❌ Not Implemented",
+                    "FGS Drift (GPU) ❌ Not Implemented", 
+                    "Bayesian Multi-Component (GPU) ❌ Not Implemented"
+                ])
+        
+        self.detrend_model_combo.addItems(detrend_options)
+        
+        # Set a default selection if available
+        if detrend_options:
+            self.detrend_model_combo.setCurrentIndex(0)
+
     def on_detrend_model_change(self, model_name):
         index = self.model_widget_map.get(model_name, 0)
         self.detrend_params_stack.setCurrentIndex(index)
