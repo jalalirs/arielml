@@ -1,22 +1,9 @@
 # arielml/utils.py
 import numpy as np
 
-def calculate_transit_mask(time, period, semi_major_axis, stellar_radius, inclination, xp):
+def calculate_transit_mask_physical(time, period, semi_major_axis, stellar_radius, inclination, xp):
     """
-    Calculates a boolean mask identifying the in-transit portions of a light curve.
-    
-    This function uses a standard geometric model of the transit.
-    
-    Args:
-        time (xp.ndarray): Array of observation times in days.
-        period (float): Orbital period of the planet in days.
-        semi_major_axis (float): Semi-major axis of the orbit in AU.
-        stellar_radius (float): Radius of the star in solar radii.
-        inclination (float): Orbital inclination in degrees.
-        xp (module): The numerical backend (numpy or cupy).
-
-    Returns:
-        xp.ndarray: A boolean array where True indicates an in-transit data point.
+    Calculates a boolean mask based on the physical, geometric model of the transit.
     """
     # Convert stellar radius from Solar radii to Astronomical Units (AU) for consistency.
     R_sun_to_AU = 0.00465047
@@ -26,26 +13,82 @@ def calculate_transit_mask(time, period, semi_major_axis, stellar_radius, inclin
     inc_rad = xp.deg2rad(inclination)
 
     # Calculate the full duration of the transit (from first to last contact).
-    # This formula is derived from the geometry of the star-planet system.
-    # See, e.g., Winn (2010), "Transits and Occultations", Eq. 14.
-    # We assume a circular orbit (e=0).
     transit_duration_days = (period / np.pi) * xp.arcsin(
         (stellar_radius_au / semi_major_axis) * (1 / xp.sin(inc_rad))
     )
     
-    # Calculate the duration in terms of orbital phase.
     transit_duration_phase = transit_duration_days / period
 
-    # Calculate the orbital phase. We assume t0 (mid-transit time) is 0.
-    # The phase is calculated from -0.5 to 0.5 for easier masking around zero.
+    # Calculate the orbital phase, centered on 0.
     phase = (time / period) % 1.0
-    # Center the phase on 0 by wrapping values > 0.5 to the negative side.
     phase = xp.where(phase > 0.5, phase - 1.0, phase)
 
-    # The transit is centered at phase 0. We need half the duration for masking.
     half_duration_phase = transit_duration_phase / 2.0
     
-    # The mask is True for any point whose absolute phase is within half the transit duration.
     in_transit_mask = xp.abs(phase) < half_duration_phase
     
     return in_transit_mask
+
+
+def find_transit_mask_empirical(time, flux, Navg=250, Noffset=150, fit_order=5, xp=np):
+    """
+    Finds the transit window by looking for the steepest drop (ingress) and
+    rise (egress) in the light curve data itself. This is a data-driven approach.
+    
+    Args:
+        time (xp.ndarray): The time array of the observation.
+        flux (xp.ndarray): The light curve flux (1D array).
+        Navg (int): The window size for the moving average smoothing.
+        Noffset (int): The offset for calculating the numerical derivative.
+        fit_order (int): The polynomial order for detrending the smoothed curve.
+        xp (module): The numerical backend (numpy or cupy).
+
+    Returns:
+        xp.ndarray: A boolean array where True indicates an in-transit data point.
+    """
+    # This function must run on the CPU with NumPy due to polyfit and cumsum.
+    is_gpu = (xp.__name__ == 'cupy')
+    if is_gpu:
+        flux_np = flux.get()
+        time_np = time.get()
+    else:
+        flux_np = flux
+        time_np = time
+
+    # --- 1. Smooth the light curve with a moving average ---
+    # The cumsum trick is a fast way to implement a moving average.
+    ret = np.cumsum(flux_np, dtype=float)
+    ret[Navg:] = ret[Navg:] - ret[:-Navg]
+    data_smoothed = ret[Navg - 1:] / Navg
+    
+    # --- 2. Detrend the smoothed curve with a polynomial ---
+    x_smooth = np.arange(len(data_smoothed))
+    try:
+        poly_coeffs = np.polyfit(x_smooth, data_smoothed, fit_order)
+    except np.linalg.LinAlgError:
+        # If the polynomial fit fails, fall back to a lower order.
+        poly_coeffs = np.polyfit(x_smooth, data_smoothed, 1)
+        
+    poly_fit = np.poly1d(poly_coeffs)
+    data_detrended = data_smoothed - poly_fit(x_smooth)
+    
+    # --- 3. Find the derivative by shifting and subtracting ---
+    # This finds where the slope changes most dramatically.
+    diff = data_detrended[Noffset:] - data_detrended[:-Noffset]
+    
+    # --- 4. Find ingress/egress and create the mask ---
+    # Find the index of the minimum (steepest drop) and maximum (steepest rise).
+    # Add offsets to account for the smoothing and differencing windows.
+    idx_ingress = int(np.argmin(diff) + (Navg / 2) + (Noffset / 2))
+    idx_egress = int(np.argmax(diff) + (Navg / 2) + (Noffset / 2))
+
+    # Ensure ingress comes before egress
+    if idx_ingress > idx_egress:
+        idx_ingress, idx_egress = idx_egress, idx_ingress
+
+    # Create a boolean mask that is True between ingress and egress
+    mask_np = np.zeros_like(time_np, dtype=bool)
+    mask_np[idx_ingress:idx_egress] = True
+    
+    # Convert back to a GPU array if necessary
+    return xp.asarray(mask_np) if is_gpu else mask_np
