@@ -102,6 +102,7 @@ class DataInspector(QMainWindow):
         self.instrument_combo = QComboBox()
         self.instrument_combo.addItems(["AIRS-CH0", "FGS1"])
         self.instrument_combo.currentTextChanged.connect(self.populate_obs_ids)
+        self.instrument_combo.currentTextChanged.connect(self.update_detrending_options)
 
         self.backend_combo = QComboBox()
         self.backend_combo.addItems(["cpu", "gpu"])
@@ -222,92 +223,10 @@ class DataInspector(QMainWindow):
         if GP_GPU_ENABLED:
              self.model_widget_map["Hybrid GP (GPU)"] = self.detrend_params_stack.indexOf(hybrid_widget)
         
+        # Advanced GP methods are not yet implemented
         # Advanced GP (2-Step) parameters
-        if SKLEARN_GP_ENABLED:
-            advanced_widget = QWidget()
-            advanced_layout = QVBoxLayout(advanced_widget)
-            
-            # Drift kernel
-            drift_kernel_layout = QHBoxLayout()
-            drift_kernel_layout.addWidget(QLabel("Drift Kernel:"))
-            self.advanced_drift_kernel_combo = QComboBox()
-            self.advanced_drift_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
-            drift_kernel_layout.addWidget(self.advanced_drift_kernel_combo)
-            advanced_layout.addLayout(drift_kernel_layout)
-            
-            # Depth kernel
-            depth_kernel_layout = QHBoxLayout()
-            depth_kernel_layout.addWidget(QLabel("Depth Kernel:"))
-            self.advanced_depth_kernel_combo = QComboBox()
-            self.advanced_depth_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
-            self.advanced_depth_kernel_combo.setCurrentText('Matern32')
-            depth_kernel_layout.addWidget(self.advanced_depth_kernel_combo)
-            advanced_layout.addLayout(depth_kernel_layout)
-            
-            # Noise level
-            noise_layout = QHBoxLayout()
-            noise_layout.addWidget(QLabel("Noise Level:"))
-            self.advanced_noise_spinbox = QDoubleSpinBox()
-            self.advanced_noise_spinbox.setRange(0.01, 1.0)
-            self.advanced_noise_spinbox.setValue(0.1)
-            self.advanced_noise_spinbox.setSingleStep(0.01)
-            noise_layout.addWidget(self.advanced_noise_spinbox)
-            advanced_layout.addLayout(noise_layout)
-            
-            self.model_widget_map["Advanced GP (2-Step)"] = self.detrend_params_stack.addWidget(advanced_widget)
-            
-            # Multi-Kernel GP parameters
-            multikernel_widget = QWidget()
-            multikernel_layout = QVBoxLayout(multikernel_widget)
-            
-            # Average kernel
-            avg_kernel_layout = QHBoxLayout()
-            avg_kernel_layout.addWidget(QLabel("Average Kernel:"))
-            self.multikernel_avg_kernel_combo = QComboBox()
-            self.multikernel_avg_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
-            avg_kernel_layout.addWidget(self.multikernel_avg_kernel_combo)
-            multikernel_layout.addLayout(avg_kernel_layout)
-            
-            # Spectral kernel
-            spec_kernel_layout = QHBoxLayout()
-            spec_kernel_layout.addWidget(QLabel("Spectral Kernel:"))
-            self.multikernel_spec_kernel_combo = QComboBox()
-            self.multikernel_spec_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
-            self.multikernel_spec_kernel_combo.setCurrentText('Matern32')
-            spec_kernel_layout.addWidget(self.multikernel_spec_kernel_combo)
-            multikernel_layout.addLayout(spec_kernel_layout)
-            
-            # Sparse approximation
-            sparse_layout = QHBoxLayout()
-            self.multikernel_sparse_checkbox = QCheckBox("Use Sparse Approximation")
-            self.multikernel_sparse_checkbox.setChecked(True)
-            sparse_layout.addWidget(self.multikernel_sparse_checkbox)
-            multikernel_layout.addLayout(sparse_layout)
-            
-            self.model_widget_map["Multi-Kernel GP"] = self.detrend_params_stack.addWidget(multikernel_widget)
-            
-            # Transit Window GP parameters
-            transit_window_widget = QWidget()
-            transit_window_layout = QVBoxLayout(transit_window_widget)
-            
-            # Transit kernel
-            transit_kernel_layout = QHBoxLayout()
-            transit_kernel_layout.addWidget(QLabel("Transit Kernel:"))
-            self.transit_window_kernel_combo = QComboBox()
-            self.transit_window_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
-            self.transit_window_kernel_combo.setCurrentText('Matern32')
-            transit_kernel_layout.addWidget(self.transit_window_kernel_combo)
-            transit_window_layout.addLayout(transit_kernel_layout)
-            
-            # Drift kernel
-            transit_drift_kernel_layout = QHBoxLayout()
-            transit_drift_kernel_layout.addWidget(QLabel("Drift Kernel:"))
-            self.transit_window_drift_kernel_combo = QComboBox()
-            self.transit_window_drift_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
-            transit_drift_kernel_layout.addWidget(self.transit_window_drift_kernel_combo)
-            transit_window_layout.addLayout(transit_drift_kernel_layout)
-            
-            self.model_widget_map["Transit Window GP"] = self.detrend_params_stack.addWidget(transit_window_widget)
+        # Multi-Kernel GP parameters  
+        # Transit Window GP parameters
             
             # AIRS Drift parameters
             airs_widget = QWidget()
@@ -541,33 +460,10 @@ class DataInspector(QMainWindow):
                 QApplication.processEvents()
                 return detrending.HybridDetrender(use_gpu=True, training_iter=self.hybrid_iter_spinbox.value(), poly_degree=self.hybrid_poly_degree_spinbox.value())
         
-        # Advanced sklearn methods
-        elif model_name == "Advanced GP (2-Step)":
-            if SKLEARN_GP_ENABLED: 
-                self.statusBar().showMessage("Running Advanced GP Detrending (2-Step)...", 30000)
-                QApplication.processEvents()
-                return detrending.AdvancedGPDetrender(
-                    drift_kernel=self.advanced_drift_kernel_combo.currentText(),
-                    depth_kernel=self.advanced_depth_kernel_combo.currentText(),
-                    noise_level=self.advanced_noise_spinbox.value()
-                )
-        elif model_name == "Multi-Kernel GP":
-            if SKLEARN_GP_ENABLED:
-                self.statusBar().showMessage("Running Multi-Kernel GP Detrending...", 30000)
-                QApplication.processEvents()
-                return detrending.MultiKernelDetrender(
-                    average_kernel=self.multikernel_avg_kernel_combo.currentText(),
-                    spectral_kernel=self.multikernel_spec_kernel_combo.currentText(),
-                    use_sparse=self.multikernel_sparse_checkbox.isChecked()
-                )
-        elif model_name == "Transit Window GP":
-            if SKLEARN_GP_ENABLED:
-                self.statusBar().showMessage("Running Transit Window GP Detrending...", 30000)
-                QApplication.processEvents()
-                return detrending.TransitWindowDetrender(
-                    transit_kernel=self.transit_window_kernel_combo.currentText(),
-                    drift_kernel=self.transit_window_drift_kernel_combo.currentText()
-                )
+        # Advanced sklearn methods are not yet implemented
+        # elif model_name == "Advanced GP (2-Step)":
+        # elif model_name == "Multi-Kernel GP":
+        # elif model_name == "Transit Window GP":
         
         # ariel_gp-style methods
         elif model_name == "AIRS Drift (CPU)":
@@ -706,17 +602,18 @@ class DataInspector(QMainWindow):
         obs_ids = sorted([f.stem.split('_')[-1] for f in planet_dir.glob(f"{self.instrument_combo.currentText()}_signal_*.parquet") if f.stem.split('_')[-1].isdigit()], key=int)
         if obs_ids: self.obs_combo.addItems(obs_ids)
     def update_detrending_options(self):
-        """Update the detrending dropdown based on the selected backend."""
+        """Update the detrending dropdown based on the selected backend and instrument."""
         current_backend = self.backend_combo.currentText()
+        current_instrument = self.instrument_combo.currentText()
         
         # Clear current options
         self.detrend_model_combo.clear()
         
-        # Build detrending options based on selected backend
+        # Build detrending options based on selected backend and instrument
         detrend_options = []
         
         if current_backend == "cpu":
-            # CPU-only options
+            # CPU-only options (available for all instruments)
             detrend_options.extend([
                 "Polynomial",
                 "Savitzky-Golay", 
@@ -725,19 +622,25 @@ class DataInspector(QMainWindow):
             ])
             
             # Advanced models (if sklearn available)
-            if SKLEARN_GP_ENABLED:
-                detrend_options.extend([
-                    "Advanced GP (2-Step)",
-                    "Multi-Kernel GP", 
-                    "Transit Window GP"
-                ])
+            # Note: These methods are not yet implemented
+            # if SKLEARN_GP_ENABLED:
+            #     detrend_options.extend([
+            #         "Advanced GP (2-Step)",
+            #         "Multi-Kernel GP", 
+            #         "Transit Window GP"
+            #     ])
             
-            # ariel_gp-style models (CPU)
-            detrend_options.extend([
-                "AIRS Drift (CPU)",
-                "FGS Drift (CPU)", 
-                "Bayesian Multi-Component (CPU)"
-            ])
+            # Instrument-specific ariel_gp-style models (CPU)
+            if current_instrument == "AIRS-CH0":
+                detrend_options.extend([
+                    "AIRS Drift (CPU)",
+                    "Bayesian Multi-Component (CPU)"
+                ])
+            elif current_instrument == "FGS1":
+                detrend_options.extend([
+                    "FGS Drift (CPU)",
+                    "Bayesian Multi-Component (CPU)"
+                ])
             
         elif current_backend == "gpu":
             # GPU-only options (if available)
@@ -747,21 +650,34 @@ class DataInspector(QMainWindow):
                     "Hybrid GP (GPU)"
                 ])
                 
-                # ariel_gp-style models (GPU)
-                detrend_options.extend([
-                    "AIRS Drift (GPU)",
-                    "FGS Drift (GPU)",
-                    "Bayesian Multi-Component (GPU)"
-                ])
+                # Instrument-specific ariel_gp-style models (GPU)
+                if current_instrument == "AIRS-CH0":
+                    detrend_options.extend([
+                        "AIRS Drift (GPU)",
+                        "Bayesian Multi-Component (GPU)"
+                    ])
+                elif current_instrument == "FGS1":
+                    detrend_options.extend([
+                        "FGS Drift (GPU)",
+                        "Bayesian Multi-Component (GPU)"
+                    ])
             else:
                 # Show not implemented options when GPU is not available
                 detrend_options.extend([
                     "GP (GPyTorch GPU) ❌ Not Implemented",
-                    "Hybrid GP (GPU) ❌ Not Implemented",
-                    "AIRS Drift (GPU) ❌ Not Implemented",
-                    "FGS Drift (GPU) ❌ Not Implemented", 
-                    "Bayesian Multi-Component (GPU) ❌ Not Implemented"
+                    "Hybrid GP (GPU) ❌ Not Implemented"
                 ])
+                
+                if current_instrument == "AIRS-CH0":
+                    detrend_options.extend([
+                        "AIRS Drift (GPU) ❌ Not Implemented",
+                        "Bayesian Multi-Component (GPU) ❌ Not Implemented"
+                    ])
+                elif current_instrument == "FGS1":
+                    detrend_options.extend([
+                        "FGS Drift (GPU) ❌ Not Implemented",
+                        "Bayesian Multi-Component (GPU) ❌ Not Implemented"
+                    ])
         
         self.detrend_model_combo.addItems(detrend_options)
         
