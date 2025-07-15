@@ -1,4 +1,4 @@
-# arielml/utils.py
+# arielml/utils/transit_masks.py
 import numpy as np
 
 def calculate_transit_mask_physical(time, period, semi_major_axis, stellar_radius, inclination, xp):
@@ -91,4 +91,4 @@ def find_transit_mask_empirical(time, flux, Navg=250, Noffset=150, fit_order=5, 
     mask_np[idx_ingress:idx_egress] = True
     
     # Convert back to a GPU array if necessary
-    return xp.asarray(mask_np) if is_gpu else mask_np
+    return xp.asarray(mask_np) if is_gpu else mask_np 

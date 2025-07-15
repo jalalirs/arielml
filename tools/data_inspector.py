@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QSlider, QLabel, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, QStatusBar,
     QTextEdit, QTabWidget, QStackedWidget
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,6 +23,7 @@ from arielml.data.observation import DataObservation
 from arielml.data import loaders, detrending
 from arielml.config import DATASET_DIR, PHOTOMETRY_APERTURES
 from arielml.backend import GPU_ENABLED, GP_GPU_ENABLED
+from arielml.utils.signals import DetrendingProgress
 
 # Check if sklearn GP is available
 try:
@@ -30,6 +31,110 @@ try:
     SKLEARN_GP_ENABLED = True
 except ImportError:
     SKLEARN_GP_ENABLED = False
+
+
+class DataLoadingWorker(QThread):
+    """Worker thread for loading data asynchronously."""
+    
+    progress_signal = pyqtSignal(str)  # Simple string messages for loading
+    finished_signal = pyqtSignal(object)  # Emit the loaded observation
+    error_signal = pyqtSignal(str)
+    
+    def __init__(self, planet_id, instrument, obs_id, split, backend):
+        super().__init__()
+        self.planet_id = planet_id
+        self.instrument = instrument
+        self.obs_id = obs_id
+        self.split = split
+        self.backend = backend
+        self._should_stop = False
+    
+    def run(self):
+        """Load data in a separate thread."""
+        observation = None
+        try:
+            self.progress_signal.emit("Creating observation object...")
+            self.check_stop()
+            
+            observation = DataObservation(self.planet_id, self.instrument, int(self.obs_id), self.split)
+            
+            self.progress_signal.emit("Loading raw data...")
+            self.check_stop()
+            
+            observation.load(backend=self.backend)
+            
+            # Final check before emitting success
+            self.check_stop()
+            
+            self.progress_signal.emit("Data loading completed")
+            self.finished_signal.emit(observation)
+            
+        except InterruptedError:
+            # Operation was stopped by user - don't emit error
+            pass
+        except Exception as e:
+            self.error_signal.emit(str(e))
+    
+    def check_stop(self):
+        """Check if a stop has been requested."""
+        if self._should_stop:
+            raise InterruptedError("Data loading stopped by user")
+    
+    def stop(self):
+        """Request the worker to stop."""
+        self._should_stop = True
+
+
+class PipelineWorker(QThread):
+    """Worker thread for running the pipeline asynchronously."""
+    
+    progress_signal = pyqtSignal(DetrendingProgress)
+    finished_signal = pyqtSignal()
+    error_signal = pyqtSignal(str)
+    
+    def __init__(self, observation, detrender, mask_method="empirical"):
+        super().__init__()
+        self.observation = observation
+        self.detrender = detrender
+        self.mask_method = mask_method
+        self._should_stop = False
+    
+    def run(self):
+        """Run the pipeline in a separate thread."""
+        try:
+            # Connect the detrender's progress signals to our signal
+            self.detrender.add_observer(self._on_progress)
+            
+            # Run the detrending
+            self.observation.run_detrending(self.detrender, mask_method=self.mask_method)
+            
+            # Final check before emitting success
+            if self._should_stop:
+                raise InterruptedError("Operation stopped by user")
+            
+            # Emit finished signal
+            self.finished_signal.emit()
+            
+        except InterruptedError:
+            # Operation was stopped by user - don't emit error
+            pass
+        except Exception as e:
+            self.error_signal.emit(str(e))
+        finally:
+            # Clean up observer
+            if hasattr(self.detrender, 'remove_observer'):
+                self.detrender.remove_observer(self._on_progress)
+    
+    def _on_progress(self, progress: DetrendingProgress):
+        """Handle progress updates from the detrender."""
+        self.progress_signal.emit(progress)
+    
+    def stop(self):
+        """Request the worker to stop."""
+        self._should_stop = True
+        if hasattr(self.detrender, 'request_stop'):
+            self.detrender.request_stop()
+
 
 class DataInspector(QMainWindow):
     """
@@ -43,6 +148,8 @@ class DataInspector(QMainWindow):
 
         self.observation = None
         self.star_info_df = None
+        self.worker = None
+        self.loading_worker = None
 
         # --- Main Layout ---
         central_widget = QWidget()
@@ -78,6 +185,9 @@ class DataInspector(QMainWindow):
         self.apply_button = QPushButton("Apply Changes & Rerun Pipeline")
         self.apply_button.clicked.connect(self.run_pipeline_and_update_plots)
         main_layout.addWidget(self.apply_button)
+        
+        # Progress tracking
+        main_layout.addWidget(self._create_progress_group())
         
         main_layout.addStretch()
         
@@ -361,6 +471,30 @@ class DataInspector(QMainWindow):
 
         analysis_group.setLayout(layout)
         return analysis_group
+    
+    def _create_progress_group(self):
+        """Create the progress tracking UI group."""
+        progress_group = QGroupBox("Progress")
+        layout = QVBoxLayout()
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+        
+        # Status label
+        self.progress_label = QLabel("Ready")
+        self.progress_label.setVisible(False)
+        layout.addWidget(self.progress_label)
+        
+        # Stop button
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setVisible(False)
+        self.stop_button.clicked.connect(self.stop_pipeline)
+        layout.addWidget(self.stop_button)
+        
+        progress_group.setLayout(layout)
+        return progress_group
 
     def _create_visuals_panel(self):
         main_layout = QVBoxLayout()
@@ -414,25 +548,253 @@ class DataInspector(QMainWindow):
         if not (self.observation and self.observation.is_loaded):
             self.statusBar().showMessage("Please load data first.", 5000)
             return
-        self.statusBar().showMessage("Running pipeline...", 10000)
-        QApplication.processEvents()
+        
+        # Run calibration and photometry synchronously (fast operations)
         try:
             steps_to_run = {name: cb.isChecked() for name, cb in self.calib_checkboxes.items()}
             self.observation.run_calibration_pipeline(steps_to_run)
             self.observation.run_photometry()
-            
-            mask_method = self.mask_method_combo.currentText()
-            detrender = self._get_detrender(self.detrend_model_combo.currentText())
-            if detrender:
-                self.observation.run_detrending(detrender, mask_method=mask_method)
-
-            self.observation.run_phase_folding(n_bins=self.bins_spinbox.value())
         except (ValueError, RuntimeError) as e:
             self.statusBar().showMessage(f"ERROR: {e}", 15000)
             print(f"ERROR: {e}")
             return
-        self._update_all_plots()
-        self.statusBar().showMessage("Pipeline finished.", 5000)
+        
+        # Run detrending asynchronously with progress tracking
+        mask_method = self.mask_method_combo.currentText()
+        detrender = self._get_detrender(self.detrend_model_combo.currentText())
+        
+        if detrender and hasattr(detrender, 'add_observer'):
+            # Use worker thread for detrending with progress tracking
+            self._run_detrending_async(detrender, mask_method)
+        else:
+            # Fall back to synchronous execution for simple detrenders
+            try:
+                # Set UI to busy state briefly
+                self._set_ui_busy(True, "pipeline")
+                
+                if detrender:
+                    self.observation.run_detrending(detrender, mask_method=mask_method)
+                self.observation.run_phase_folding(n_bins=self.bins_spinbox.value())
+                self._update_all_plots()
+                
+                # Set UI to idle state
+                self._set_ui_busy(False)
+                self.statusBar().showMessage("Pipeline finished.", 5000)
+            except (ValueError, RuntimeError) as e:
+                self._set_ui_busy(False)
+                self.statusBar().showMessage(f"ERROR: {e}", 15000)
+                print(f"ERROR: {e}")
+    
+    def _run_detrending_async(self, detrender, mask_method):
+        """Run detrending asynchronously with progress tracking."""
+        # Set UI to busy state
+        self._set_ui_busy(True, "detrending")
+        
+        # Create and start worker
+        self.worker = PipelineWorker(self.observation, detrender, mask_method)
+        self.worker.progress_signal.connect(self._on_detrending_progress)
+        self.worker.finished_signal.connect(self._on_detrending_finished)
+        self.worker.error_signal.connect(self._on_detrending_error)
+        self.worker.start()
+    
+    def _on_detrending_progress(self, progress: DetrendingProgress):
+        """Handle progress updates from the detrender."""
+        # Update progress bar
+        self.progress_bar.setValue(int(progress.progress * 100))
+        
+        # Update status message
+        message = progress.message
+        if progress.current_wavelength is not None and progress.total_wavelengths is not None:
+            message += f" ({progress.current_wavelength + 1}/{progress.total_wavelengths})"
+        self.progress_label.setText(message)
+        
+        # Update status bar
+        self.statusBar().showMessage(message, 1000)
+    
+    def _on_detrending_finished(self):
+        """Handle completion of detrending."""
+        try:
+            # Run phase folding
+            self.observation.run_phase_folding(n_bins=self.bins_spinbox.value())
+            
+            # Update plots
+            self._update_all_plots()
+            
+            # Set UI to idle state
+            self._set_ui_busy(False)
+            
+            self.statusBar().showMessage("Pipeline finished.", 5000)
+            
+        except Exception as e:
+            self._on_detrending_error(str(e))
+        finally:
+            # Clean up worker
+            if self.worker:
+                self.worker.deleteLater()
+                self.worker = None
+    
+    def _on_detrending_error(self, error_message: str):
+        """Handle errors during detrending."""
+        # Set UI to idle state
+        self._set_ui_busy(False)
+        
+        # Show error (but not for user stops)
+        if "stopped by user" not in error_message.lower():
+            self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
+            print(f"ERROR: {error_message}")
+        else:
+            self.statusBar().showMessage("Pipeline stopped by user", 5000)
+        
+        # Clean up worker
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
+    
+    def _set_ui_busy(self, busy: bool, operation: str = "processing"):
+        """Set UI to busy or idle state."""
+        if busy:
+            # Disable all interactive elements
+            self.load_button.setEnabled(False)
+            self.apply_button.setEnabled(False)
+            self.split_combo.setEnabled(False)
+            self.planet_combo.setEnabled(False)
+            self.obs_combo.setEnabled(False)
+            self.instrument_combo.setEnabled(False)
+            self.backend_combo.setEnabled(False)
+            
+            # Show progress UI
+            self.progress_bar.setVisible(True)
+            self.progress_label.setVisible(True)
+            self.stop_button.setVisible(True)
+            
+            # Reset progress
+            self.progress_bar.setValue(0)
+            self.progress_label.setText(f"Starting {operation}...")
+            
+        else:
+            # Enable all interactive elements
+            self.load_button.setEnabled(True)
+            self.apply_button.setEnabled(True)
+            self.split_combo.setEnabled(True)
+            self.planet_combo.setEnabled(True)
+            self.obs_combo.setEnabled(True)
+            self.instrument_combo.setEnabled(True)
+            self.backend_combo.setEnabled(True)
+            
+            # Hide progress UI
+            self.progress_bar.setVisible(False)
+            self.progress_label.setVisible(False)
+            self.stop_button.setVisible(False)
+    
+    def stop_pipeline(self):
+        """Stop the currently running pipeline and safely abort all changes."""
+        if self.worker and self.worker.isRunning():
+            # Stop detrending worker
+            self.worker.stop()
+            self.worker.wait()  # Wait for thread to finish
+            
+            # Safely abort detrending changes
+            self._abort_detrending_changes()
+            self._on_detrending_error("Pipeline stopped by user")
+            
+        elif self.loading_worker and self.loading_worker.isRunning():
+            # Stop loading worker
+            self.loading_worker.stop()
+            self.loading_worker.wait()  # Wait for thread to finish
+            
+            # Safely abort loading changes
+            self._abort_loading_changes()
+            self._on_loading_error("Data loading stopped by user")
+    
+    def _abort_detrending_changes(self):
+        """Safely abort any partial detrending changes."""
+        if self.observation and self.observation.is_loaded:
+            # Clear any partial detrending results
+            if hasattr(self.observation, 'detrended_light_curves'):
+                self.observation.detrended_light_curves = None
+            if hasattr(self.observation, 'noise_models'):
+                self.observation.noise_models = None
+            if hasattr(self.observation, 'phase_folded_lc'):
+                self.observation.phase_folded_lc = None
+            
+            # Ensure we're back to a clean state
+            self._ensure_clean_state()
+            
+            # Update plots to show original data
+            self._update_all_plots()
+    
+    def _ensure_clean_state(self):
+        """Ensure the observation is in a clean state after stopping."""
+        if self.observation and self.observation.is_loaded:
+            # Verify that only the original data remains
+            # Detrending results should be None
+            if hasattr(self.observation, 'detrended_light_curves') and self.observation.detrended_light_curves is not None:
+                self.observation.detrended_light_curves = None
+            
+            if hasattr(self.observation, 'noise_models') and self.observation.noise_models is not None:
+                self.observation.noise_models = None
+            
+            if hasattr(self.observation, 'phase_folded_lc') and self.observation.phase_folded_lc is not None:
+                self.observation.phase_folded_lc = None
+            
+            # Ensure light curves are still available (from photometry)
+            if not hasattr(self.observation, 'light_curves') or self.observation.light_curves is None:
+                # If light curves are missing, we need to re-run photometry
+                try:
+                    self.observation.run_photometry()
+                except Exception:
+                    # If photometry fails, we're in a bad state
+                    pass
+    
+    def _abort_loading_changes(self):
+        """Safely abort any partial loading changes."""
+        # Clear the observation object if it was partially created
+        if hasattr(self, 'observation'):
+            self.observation = None
+        
+        # Clear any UI elements that depend on loaded data
+        self.info_display.setText("")
+        
+        # Reset sliders to safe defaults
+        self.frame_slider.setRange(0, 0)
+        self.frame_spinbox.setRange(0, 0)
+        self.wavelength_slider.setRange(0, 0)
+        self.wavelength_spinbox.setRange(0, 0)
+        
+        # Clear plots
+        self._clear_all_plots()
+    
+    def _clear_all_plots(self):
+        """Clear all plots to show empty state."""
+        # Clear image plot
+        if hasattr(self, 'image_ax'):
+            self.image_ax.clear()
+            self.image_ax.set_title("No data loaded")
+            if hasattr(self, 'image_canvas'):
+                self.image_canvas.draw()
+        
+        # Clear light curve plots
+        if hasattr(self, 'single_lc_ax'):
+            self.single_lc_ax.clear()
+            self.single_lc_ax.set_title("No data loaded")
+            if hasattr(self, 'single_lc_canvas'):
+                self.single_lc_canvas.draw()
+        
+        if hasattr(self, 'detrended_lc_ax'):
+            self.detrended_lc_ax.clear()
+            self.detrended_lc_ax.set_title("No data loaded")
+            if hasattr(self, 'detrended_lc_canvas'):
+                self.detrended_lc_canvas.draw()
+        
+        if hasattr(self, 'phase_folded_ax'):
+            self.phase_folded_ax.clear()
+            self.phase_folded_ax.set_title("No data loaded")
+            if hasattr(self, 'phase_folded_canvas'):
+                self.phase_folded_canvas.draw()
+        
+        # Clear log display
+        if hasattr(self, 'log_display'):
+            self.log_display.setText("")
 
     def _get_detrender(self, model_name):
         # Check for not implemented methods
@@ -574,18 +936,91 @@ class DataInspector(QMainWindow):
         if wavelength_col >= len(folded_data): wavelength_col = 0
         bin_centers, binned_flux, binned_error = folded_data[wavelength_col]; self.phase_folded_ax.errorbar(bin_centers, binned_flux, yerr=binned_error, fmt='o', color='black', ecolor='gray', elinewidth=1, capsize=2); self.phase_folded_ax.axhline(1.0, color='r', linestyle='--', alpha=0.7); self.phase_folded_ax.set_title(f"Phase-Folded Transit (Wavelength: {wavelength_col})"); self.phase_folded_ax.set_xlabel("Orbital Phase"); self.phase_folded_ax.set_ylabel("Normalized Flux"); self.phase_folded_ax.grid(True, alpha=0.3); self.phase_folded_canvas.draw()
     def load_data(self):
-        planet_id = self.planet_combo.currentText(); obs_id = self.obs_combo.currentText()
-        if not all([planet_id, obs_id]): self.statusBar().showMessage("Error: Missing Planet or Observation ID.", 5000); return
+        planet_id = self.planet_combo.currentText()
+        obs_id = self.obs_combo.currentText()
+        
+        if not all([planet_id, obs_id]): 
+            self.statusBar().showMessage("Error: Missing Planet or Observation ID.", 5000)
+            return
+        
+        # Set UI to busy state
+        self._set_ui_busy(True, "data loading")
+        
+        # Create and start loading worker
+        self.loading_worker = DataLoadingWorker(
+            planet_id=planet_id,
+            instrument=self.instrument_combo.currentText(),
+            obs_id=obs_id,
+            split=self.split_combo.currentText(),
+            backend=self.backend_combo.currentText()
+        )
+        
+        # Connect signals
+        self.loading_worker.progress_signal.connect(self._on_loading_progress)
+        self.loading_worker.finished_signal.connect(self._on_loading_finished)
+        self.loading_worker.error_signal.connect(self._on_loading_error)
+        
+        # Start loading
+        self.loading_worker.start()
+    
+    def _on_loading_progress(self, message: str):
+        """Handle progress updates from data loading."""
+        self.progress_label.setText(message)
+        self.statusBar().showMessage(message, 1000)
+        self.progress_bar.setValue(50)  # Simple progress for loading
+    
+    def _on_loading_finished(self, observation):
+        """Handle completion of data loading."""
         try:
-            self.statusBar().showMessage(f"Loading data for {planet_id}..."); QApplication.processEvents()
-            self.observation = DataObservation(planet_id, self.instrument_combo.currentText(), int(obs_id), self.split_combo.currentText()); self.observation.load(backend=self.backend_combo.currentText())
-            if self.star_info_df is not None and int(planet_id) in self.star_info_df.index: self.info_display.setText(self.star_info_df.loc[int(planet_id)].to_string())
-            is_fgs = (self.instrument_combo.currentText() == 'FGS1'); self.wavelength_slider.setEnabled(not is_fgs); self.wavelength_spinbox.setEnabled(not is_fgs)
+            self.observation = observation
+            
+            # Update star info display
+            if self.star_info_df is not None and int(self.planet_combo.currentText()) in self.star_info_df.index:
+                self.info_display.setText(self.star_info_df.loc[int(self.planet_combo.currentText())].to_string())
+            
+            # Update UI controls based on instrument
+            is_fgs = (self.instrument_combo.currentText() == 'FGS1')
+            self.wavelength_slider.setEnabled(not is_fgs)
+            self.wavelength_spinbox.setEnabled(not is_fgs)
+            
+            # Update slider ranges
             max_wl = self.observation.raw_signal.shape[2] - 1
-            self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1); self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
-            self.wavelength_slider.setRange(0, max_wl); self.wavelength_spinbox.setRange(0, max_wl)
+            self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1)
+            self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
+            self.wavelength_slider.setRange(0, max_wl)
+            self.wavelength_spinbox.setRange(0, max_wl)
+            
+            # Set UI to idle state
+            self._set_ui_busy(False)
+            
+            # Run pipeline
             self.run_pipeline_and_update_plots()
-        except Exception as e: self.statusBar().showMessage(f"Error loading data: {e}", 15000); print(f"ERROR: {e}")
+            
+        except Exception as e:
+            self._on_loading_error(str(e))
+        finally:
+            # Clean up worker
+            if self.loading_worker:
+                self.loading_worker.deleteLater()
+                self.loading_worker = None
+    
+    def _on_loading_error(self, error_message: str):
+        """Handle errors during data loading."""
+        # Set UI to idle state
+        self._set_ui_busy(False)
+        
+        # Show error (but not for user stops)
+        if "stopped by user" not in error_message.lower():
+            self.statusBar().showMessage(f"Error loading data: {error_message}", 15000)
+            print(f"ERROR: {error_message}")
+        else:
+            self.statusBar().showMessage("Data loading stopped by user", 5000)
+        
+        # Clean up worker
+        if self.loading_worker:
+            self.loading_worker.deleteLater()
+            self.loading_worker = None
+    
     def populate_planet_ids(self):
         current_planet = self.planet_combo.currentText(); self.planet_combo.clear(); split = self.split_combo.currentText(); self.star_info_df = loaders.load_star_info(split)
         if self.star_info_df is None: return

@@ -18,9 +18,17 @@ try:
 except ImportError:
     GP_GPU_ENABLED = False
 
+# Progress tracking
+from ..utils.observable import Observable
+from ..utils.signals import DetrendingStep, DetrendingProgress
 
-class BaseDetrender(ABC):
-    """Abstract base class for all detrending models."""
+
+class BaseDetrender(Observable, ABC):
+    """Abstract base class for all detrending models with progress tracking."""
+    
+    def __init__(self):
+        super().__init__()
+    
     @abstractmethod
     def detrend(self, time, flux, transit_mask, xp) -> Tuple["xp.ndarray", "xp.ndarray"]:
         pass
@@ -65,6 +73,7 @@ class SavGolDetrender(BaseDetrender):
 class GPDetrender(BaseDetrender):
     """CPU-based Gaussian Process detrender using the 'george' library."""
     def __init__(self, kernel: str = 'Matern32'):
+        super().__init__()
         self.kernel_name = kernel
 
     def _get_kernel(self):
@@ -72,31 +81,71 @@ class GPDetrender(BaseDetrender):
         raise ValueError(f"Unknown kernel: {self.kernel_name}")
 
     def detrend(self, time, flux, transit_mask, xp):
+        # Reset stop flag for new operation
+        self.reset_stop_flag()
+        
+        # Notify initialization
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.INITIALIZING,
+            progress=0.0,
+            message="Initializing GP detrending...",
+            total_wavelengths=flux.shape[1]
+        ))
+        
         is_gpu = (xp.__name__ == 'cupy')
         time_np, flux_np, transit_mask_np = (d.get() if is_gpu else d for d in (time, flux, transit_mask))
         noise_model_np = np.full_like(flux_np, np.nan)
-        for i in range(flux_np.shape[1]):
+        
+        total_wavelengths = flux_np.shape[1]
+        
+        for i in range(total_wavelengths):
+            # Check for stop request
+            self.check_stop_request()
+            
+            # Update progress
+            progress = (i + 1) / total_wavelengths
+            self.notify_observers(DetrendingProgress(
+                step=DetrendingStep.FITTING_PER_WAVELENGTH,
+                progress=progress,
+                message=f"Fitting GP for wavelength {i+1}/{total_wavelengths}",
+                current_wavelength=i,
+                total_wavelengths=total_wavelengths
+            ))
+            
             lc, median_val = flux_np[:, i], np.nanmedian(flux_np[:, i])
             if np.isnan(median_val) or median_val == 0:
-                noise_model_np[:, i] = 1.0; continue
+                noise_model_np[:, i] = 1.0
+                continue
+                
             lc_norm = lc / median_val
             finite_mask = np.isfinite(lc_norm)
             oot_mask = ~transit_mask_np & finite_mask
             if np.sum(oot_mask) < 20:
                 raise ValueError(f"Not enough OOT points for GP fit on channel {i}.")
+                
             oot_time, oot_flux = time_np[oot_mask], lc_norm[oot_mask]
             try:
                 kernel = self._get_kernel()
-                gp = george.GP(kernel, mean=np.nanmean(oot_flux), fit_mean=True, white_noise=np.log(np.nanstd(oot_flux)**2), fit_white_noise=True)
+                gp = george.GP(kernel, mean=np.nanmean(oot_flux), fit_mean=True, 
+                             white_noise=np.log(np.nanstd(oot_flux)**2), fit_white_noise=True)
                 gp.compute(oot_time)
                 p0 = gp.get_parameter_vector()
-                results = minimize(lambda p: -gp.log_likelihood(oot_flux, p), p0, jac=lambda p: -gp.grad_log_likelihood(oot_flux, p))
+                results = minimize(lambda p: -gp.log_likelihood(oot_flux, p), p0, 
+                                 jac=lambda p: -gp.grad_log_likelihood(oot_flux, p))
                 gp.set_parameter_vector(results.x)
                 residuals = oot_flux - gp.get_parameter('mean:value')
                 pred_noise = gp.predict(residuals, time_np, return_cov=False)
                 noise_model_np[:, i] = (pred_noise + gp.get_parameter('mean:value')) * median_val
             except Exception as e:
                 raise RuntimeError(f"George GP failed for channel {i}: {e}")
+        
+        # Notify completion
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FINALIZING,
+            progress=1.0,
+            message="GP detrending completed"
+        ))
+        
         noise_model = xp.asarray(noise_model_np) if is_gpu else noise_model_np
         return flux / noise_model, noise_model
 
@@ -115,19 +164,46 @@ if GP_GPU_ENABLED:
     class GPyTorchDetrender(BaseDetrender):
         """GPU-accelerated Gaussian Process detrender using GPyTorch."""
         def __init__(self, training_iter=50):
+            super().__init__()
             self.training_iter = training_iter
 
         def detrend(self, time, flux, transit_mask, xp):
+            # Reset stop flag for new operation
+            self.reset_stop_flag()
+            
+            # Notify initialization
+            self.notify_observers(DetrendingProgress(
+                step=DetrendingStep.INITIALIZING,
+                progress=0.0,
+                message="Initializing GPyTorch detrending...",
+                total_wavelengths=flux.shape[1]
+            ))
+            
             is_gpu = (xp.__name__ == 'cupy')
             time_np, flux_np, transit_mask_np = (d.get() if is_gpu else d for d in (time, flux, transit_mask))
             
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             noise_model_np = np.full_like(flux_np, np.nan)
+            total_wavelengths = flux_np.shape[1]
 
-            for i in range(flux_np.shape[1]):
+            for i in range(total_wavelengths):
+                # Check for stop request
+                self.check_stop_request()
+                
+                # Update progress
+                progress = (i + 1) / total_wavelengths
+                self.notify_observers(DetrendingProgress(
+                    step=DetrendingStep.FITTING_PER_WAVELENGTH,
+                    progress=progress,
+                    message=f"Fitting GPyTorch GP for wavelength {i+1}/{total_wavelengths}",
+                    current_wavelength=i,
+                    total_wavelengths=total_wavelengths
+                ))
+                
                 lc, median_val = flux_np[:, i], np.nanmedian(flux_np[:, i])
                 if np.isnan(median_val) or median_val == 0:
-                    noise_model_np[:, i] = 1.0; continue
+                    noise_model_np[:, i] = 1.0
+                    continue
                 
                 lc_norm = lc / median_val
                 finite_mask = np.isfinite(lc_norm)
@@ -157,6 +233,13 @@ if GP_GPU_ENABLED:
 
                 noise_model_np[:, i] = pred_mean * median_val
 
+            # Notify completion
+            self.notify_observers(DetrendingProgress(
+                step=DetrendingStep.FINALIZING,
+                progress=1.0,
+                message="GPyTorch detrending completed"
+            ))
+
             noise_model = xp.asarray(noise_model_np) if is_gpu else noise_model_np
             return flux / noise_model, noise_model
 
@@ -167,6 +250,7 @@ class HybridDetrender(BaseDetrender):
     2. Models the remaining per-wavelength residuals with a simple Polynomial.
     """
     def __init__(self, use_gpu=False, training_iter=50, poly_degree=2):
+        super().__init__()
         self.use_gpu = use_gpu
         self.training_iter = training_iter
         self.poly_degree = poly_degree
@@ -238,13 +322,48 @@ class HybridDetrender(BaseDetrender):
         return xp.asarray(pred_mean)
 
     def detrend(self, time, flux, transit_mask, xp):
+        # Reset stop flag for new operation
+        self.reset_stop_flag()
+        
+        # Notify initialization
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.INITIALIZING,
+            progress=0.0,
+            message="Initializing hybrid detrending...",
+            total_wavelengths=flux.shape[1]
+        ))
+        
+        # Step 1: Get common-mode noise model
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FITTING_COMMON_MODE,
+            progress=0.2,
+            message="Fitting common-mode GP..."
+        ))
+        self.check_stop_request()
+        
         common_noise_model = self._get_common_mode_noise(time, flux, transit_mask, xp)
+        
+        # Step 2: Remove common-mode and fit per-wavelength polynomials
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FITTING_PER_WAVELENGTH,
+            progress=0.5,
+            message="Fitting per-wavelength polynomials..."
+        ))
+        self.check_stop_request()
+        
         flux_residuals = flux / common_noise_model[:, xp.newaxis]
 
         poly_detrender = PolynomialDetrender(degree=self.poly_degree)
         detrended_flux, residual_noise_model = poly_detrender.detrend(time, flux_residuals, transit_mask, xp)
         
         total_noise_model = common_noise_model[:, xp.newaxis] * residual_noise_model
+        
+        # Notify completion
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FINALIZING,
+            progress=1.0,
+            message="Hybrid detrending completed"
+        ))
         
         return detrended_flux, total_noise_model
 
@@ -268,7 +387,7 @@ class AIRSDriftDetrender(BaseDetrender):
                  use_sparse: bool = True,
                  use_gpu: bool = False,
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__()
         self.avg_kernel = avg_kernel
         self.avg_length_scale = avg_length_scale
         self.spectral_kernel = spectral_kernel
@@ -289,14 +408,39 @@ class AIRSDriftDetrender(BaseDetrender):
     
     def _detrend_cpu(self, time, flux, transit_mask, xp):
         """CPU implementation using george library."""
+        # Reset stop flag for new operation
+        self.reset_stop_flag()
+        
+        # Notify initialization
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.INITIALIZING,
+            progress=0.0,
+            message="Initializing AIRS drift detrending...",
+            total_wavelengths=flux.shape[1]
+        ))
+        
         # Convert to numpy if needed
         time_np = time.get() if hasattr(time, 'get') else time
         flux_np = flux.get() if hasattr(flux, 'get') else flux
         transit_mask_np = transit_mask.get() if hasattr(transit_mask, 'get') else transit_mask
         
         noise_model = np.full_like(flux_np, np.nan)
+        total_wavelengths = flux_np.shape[1]
         
-        for i in range(flux_np.shape[1]):
+        for i in range(total_wavelengths):
+            # Check for stop request
+            self.check_stop_request()
+            
+            # Update progress
+            progress = (i + 1) / total_wavelengths
+            self.notify_observers(DetrendingProgress(
+                step=DetrendingStep.FITTING_DRIFT,
+                progress=progress,
+                message=f"Fitting AIRS drift for wavelength {i+1}/{total_wavelengths}",
+                current_wavelength=i,
+                total_wavelengths=total_wavelengths
+            ))
+            
             lc = flux_np[:, i]
             median_val = np.nanmedian(lc)
             if np.isnan(median_val) or median_val == 0:
@@ -322,6 +466,13 @@ class AIRSDriftDetrender(BaseDetrender):
             # Combine drifts
             total_drift = avg_drift + spectral_drift
             noise_model[:, i] = total_drift * median_val
+        
+        # Notify completion
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FINALIZING,
+            progress=1.0,
+            message="AIRS drift detrending completed"
+        ))
         
         noise_model_xp = xp.asarray(noise_model) if hasattr(xp, 'asarray') else noise_model
         return flux / noise_model_xp, noise_model_xp
@@ -416,7 +567,7 @@ class FGSDriftDetrender(BaseDetrender):
                  length_scale: float = 1.0,
                  use_gpu: bool = False,
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__()
         self.kernel = kernel
         self.length_scale = length_scale
         self.use_gpu = use_gpu
@@ -433,14 +584,39 @@ class FGSDriftDetrender(BaseDetrender):
     
     def _detrend_cpu(self, time, flux, transit_mask, xp):
         """CPU implementation using george library."""
+        # Reset stop flag for new operation
+        self.reset_stop_flag()
+        
+        # Notify initialization
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.INITIALIZING,
+            progress=0.0,
+            message="Initializing FGS drift detrending...",
+            total_wavelengths=flux.shape[1]
+        ))
+        
         # Convert to numpy if needed
         time_np = time.get() if hasattr(time, 'get') else time
         flux_np = flux.get() if hasattr(flux, 'get') else flux
         transit_mask_np = transit_mask.get() if hasattr(transit_mask, 'get') else transit_mask
         
         noise_model = np.full_like(flux_np, np.nan)
+        total_wavelengths = flux_np.shape[1]
         
-        for i in range(flux_np.shape[1]):
+        for i in range(total_wavelengths):
+            # Check for stop request
+            self.check_stop_request()
+            
+            # Update progress
+            progress = (i + 1) / total_wavelengths
+            self.notify_observers(DetrendingProgress(
+                step=DetrendingStep.FITTING_DRIFT,
+                progress=progress,
+                message=f"Fitting FGS drift for wavelength {i+1}/{total_wavelengths}",
+                current_wavelength=i,
+                total_wavelengths=total_wavelengths
+            ))
+            
             lc = flux_np[:, i]
             median_val = np.nanmedian(lc)
             if np.isnan(median_val) or median_val == 0:
@@ -457,6 +633,13 @@ class FGSDriftDetrender(BaseDetrender):
             # Fit average drift (1D GP over time)
             drift = self._fit_average_drift(time_np, lc_norm, oot_mask)
             noise_model[:, i] = drift * median_val
+        
+        # Notify completion
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FINALIZING,
+            progress=1.0,
+            message="FGS drift detrending completed"
+        ))
         
         noise_model_xp = xp.asarray(noise_model) if hasattr(xp, 'asarray') else noise_model
         return flux / noise_model_xp, noise_model_xp
@@ -511,7 +694,7 @@ class BayesianMultiComponentDetrender(BaseDetrender):
                  update_rate: float = 1.0,
                  use_gpu: bool = False,
                  **kwargs):
-        super().__init__(**kwargs)
+        super().__init__()
         self.n_pca = n_pca
         self.n_iter = n_iter
         self.n_samples = n_samples
@@ -530,6 +713,17 @@ class BayesianMultiComponentDetrender(BaseDetrender):
     
     def _detrend_cpu(self, time, flux, transit_mask, xp):
         """CPU implementation of complete Bayesian model."""
+        # Reset stop flag for new operation
+        self.reset_stop_flag()
+        
+        # Notify initialization
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.INITIALIZING,
+            progress=0.0,
+            message="Initializing Bayesian multi-component detrending...",
+            total_iterations=self.n_iter
+        ))
+        
         # Convert to numpy if needed
         time_np = time.get() if hasattr(time, 'get') else time
         flux_np = flux.get() if hasattr(flux, 'get') else flux
@@ -539,16 +733,47 @@ class BayesianMultiComponentDetrender(BaseDetrender):
         # For now, we'll use a combination of the individual components
         
         # 1. Fit stellar spectrum (simple baseline)
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FITTING_TRANSIT,
+            progress=0.2,
+            message="Fitting stellar spectrum..."
+        ))
+        self.check_stop_request()
         stellar_spectrum = self._fit_stellar_spectrum(flux_np)
         
         # 2. Fit drift components
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FITTING_DRIFT,
+            progress=0.4,
+            message="Fitting drift components..."
+        ))
+        self.check_stop_request()
         drift_model = self._fit_drift_components(time_np, flux_np, transit_mask_np)
         
         # 3. Fit transit window (simplified)
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FITTING_TRANSIT,
+            progress=0.6,
+            message="Fitting transit window..."
+        ))
+        self.check_stop_request()
         transit_window = self._fit_transit_window(time_np, transit_mask_np)
         
         # 4. Combine all components
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FINALIZING,
+            progress=0.8,
+            message="Combining model components..."
+        ))
+        self.check_stop_request()
         noise_model = stellar_spectrum * drift_model * transit_window
+        
+        # Notify completion
+        self.notify_observers(DetrendingProgress(
+            step=DetrendingStep.FINALIZING,
+            progress=1.0,
+            message="Bayesian multi-component detrending completed"
+        ))
         
         noise_model_xp = xp.asarray(noise_model) if hasattr(xp, 'asarray') else noise_model
         return flux / noise_model_xp, noise_model_xp

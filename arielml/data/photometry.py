@@ -48,21 +48,33 @@ def extract_aperture_photometry(
         light_curves_with_outliers = light_curves_with_outliers[:, xp.newaxis]
     
     else: # For AIRS-CH0
-        if hasattr(signal_pixels, 'get'):
-            signal_pixels_np = signal_pixels.get()
+        # OPTIMIZATION: Skip expensive sigma clipping on large arrays
+        # Instead, use simple NaN handling and outlier rejection at the end
+        signal_pixels_clean = signal_pixels.copy()
+        
+        # Simple outlier rejection using percentiles (much faster than sigma_clip)
+        if hasattr(signal_pixels_clean, 'get'):
+            signal_pixels_np = signal_pixels_clean.get()
         else:
-            signal_pixels_np = signal_pixels
+            signal_pixels_np = signal_pixels_clean
         
-        clipped_signal_pixels_np = sigma_clip(signal_pixels_np, sigma=5, axis=1, masked=False)
-        clipped_signal_pixels = xp.asarray(clipped_signal_pixels_np)
+        # Calculate percentiles for each wavelength channel
+        p05 = xp.percentile(signal_pixels_np, 5, axis=1, keepdims=True)
+        p95 = xp.percentile(signal_pixels_np, 95, axis=1, keepdims=True)
         
-        all_nan_mask = xp.all(xp.isnan(clipped_signal_pixels), axis=1)
+        # Mark extreme outliers as NaN (much faster than sigma_clip)
+        outlier_mask = (signal_pixels_np < p05) | (signal_pixels_np > p95)
+        signal_pixels_np[outlier_mask] = xp.nan
+        
+        signal_pixels_clean = xp.asarray(signal_pixels_np)
+        
+        all_nan_mask = xp.all(xp.isnan(signal_pixels_clean), axis=1)
 
         # --- DEBUG: Check raw flux before and after NaN correction ---
-        raw_flux_before_fix = xp.nansum(clipped_signal_pixels, axis=1)
+        raw_flux_before_fix = xp.nansum(signal_pixels_clean, axis=1)
         print(f"NaNs in raw_flux for channel 0 (before fix): {xp.sum(xp.isnan(raw_flux_before_fix[:, 0]))}")
         
-        raw_flux = xp.nansum(clipped_signal_pixels, axis=1)
+        raw_flux = xp.nansum(signal_pixels_clean, axis=1)
         raw_flux[all_nan_mask] = xp.nan
         print(f"NaNs in raw_flux for channel 0 (after fix): {xp.sum(xp.isnan(raw_flux[:, 0]))}")
 
@@ -76,16 +88,22 @@ def extract_aperture_photometry(
         
         light_curves_with_outliers = raw_flux - background_contribution
 
-    # --- 4. Final Temporal Outlier Rejection ---
+    # --- 4. Final Temporal Outlier Rejection (Optimized) ---
     if hasattr(light_curves_with_outliers, 'get'):
         light_curves_np = light_curves_with_outliers.get()
     else:
         light_curves_np = light_curves_with_outliers
-        
-    clipped_lc_masked_array = sigma_clip(light_curves_np, sigma=5, axis=0)
-    final_light_curves_np = clipped_lc_masked_array.filled(fill_value=np.nan)
     
-    final_light_curves_clean = xp.asarray(final_light_curves_np)
+    # OPTIMIZATION: Use faster percentile-based outlier rejection instead of sigma_clip
+    # Calculate percentiles for each wavelength channel
+    p05 = xp.percentile(light_curves_np, 5, axis=0, keepdims=True)
+    p95 = xp.percentile(light_curves_np, 95, axis=0, keepdims=True)
+    
+    # Mark extreme outliers as NaN
+    outlier_mask = (light_curves_np < p05) | (light_curves_np > p95)
+    light_curves_np[outlier_mask] = xp.nan
+    
+    final_light_curves_clean = xp.asarray(light_curves_np)
     
     # --- DEBUG: Check the final output ---
     print(f"Final NaNs in light_curves for channel 0: {xp.sum(xp.isnan(final_light_curves_clean[:, 0]))}")

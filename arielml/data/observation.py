@@ -6,7 +6,7 @@ import pandas as pd
 from . import loaders, calibration, photometry, detrending, analysis
 from ..backend import get_backend
 from ..config import ADC_GAIN, ADC_OFFSET, PHOTOMETRY_APERTURES
-from .. import utils
+from ..utils import calculate_transit_mask_physical, find_transit_mask_empirical
 
 class DataObservation:
     """
@@ -156,7 +156,7 @@ class DataObservation:
         if method == "physical":
             if self.star_info is None:
                 raise ValueError("Physical mask requires star info.")
-            return utils.calculate_transit_mask_physical(
+            return calculate_transit_mask_physical(
                 self.xp.asarray(time_array), self.star_info['P'], self.star_info['sma'], 
                 self.star_info['Rs'], self.star_info['i'], self.xp
             )
@@ -164,7 +164,7 @@ class DataObservation:
             if self.light_curves is None:
                 raise ValueError("Empirical mask requires photometry to be run first.")
             summed_flux = self.xp.nanmedian(self.light_curves, axis=1)
-            return utils.find_transit_mask_empirical(self.xp.asarray(time_array), summed_flux, xp=self.xp)
+            return find_transit_mask_empirical(self.xp.asarray(time_array), summed_flux, xp=self.xp)
         else:
             raise ValueError(f"Unknown transit mask method: {method}")
 
