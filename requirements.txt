@@ -1,11 +1,18 @@
-numpy
-pandas
-scikit-learn
-lightgbm
-matplotlib
-seaborn
-jupyter
-pyqt5
-george
-gpytorch
-# Add torch or tensorflow if using CNNs 
+numpy>=1.20.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+scipy>=1.7.0
+lightgbm>=3.3.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+jupyter>=1.0.0
+PyQt6>=6.2.0
+
+# Optional: GPU acceleration and advanced GP libraries
+george>=0.4.0
+gpytorch>=1.8.0
+cupy>=10.0.0; platform_system != "Windows"  # CuPy not available on Windows
+
+# Optional: Deep learning frameworks
+# torch>=1.8.0
+# tensorflow>=2.8.0 

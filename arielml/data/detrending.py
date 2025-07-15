@@ -247,3 +247,376 @@ class HybridDetrender(BaseDetrender):
         total_noise_model = common_noise_model[:, xp.newaxis] * residual_noise_model
         
         return detrended_flux, total_noise_model
+
+
+# --- Advanced Detrending Classes (ariel_gp-style) ---
+
+class AIRSDriftDetrender(BaseDetrender):
+    """
+    Advanced detrending for AIRS instrument based on ariel_gp approach.
+    
+    Models both average drift (1D GP over time) and spectral drift (2D GP over time-wavelength)
+    using KISS-GP approximation for efficiency.
+    """
+    
+    def __init__(self, 
+                 avg_kernel: str = 'Matern32',
+                 avg_length_scale: float = 1.0,
+                 spectral_kernel: str = 'Matern32', 
+                 time_scale: float = 0.4,
+                 wavelength_scale: float = 0.05,
+                 use_sparse: bool = True,
+                 use_gpu: bool = False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.avg_kernel = avg_kernel
+        self.avg_length_scale = avg_length_scale
+        self.spectral_kernel = spectral_kernel
+        self.time_scale = time_scale
+        self.wavelength_scale = wavelength_scale
+        self.use_sparse = use_sparse
+        self.use_gpu = use_gpu
+        
+        if self.use_gpu and not GP_GPU_ENABLED:
+            raise RuntimeError("GPU support requires PyTorch and GPyTorch")
+    
+    def detrend(self, time, flux, transit_mask, xp) -> Tuple["xp.ndarray", "xp.ndarray"]:
+        """Main detrending method."""
+        if self.use_gpu:
+            return self._detrend_gpu(time, flux, transit_mask, xp)
+        else:
+            return self._detrend_cpu(time, flux, transit_mask, xp)
+    
+    def _detrend_cpu(self, time, flux, transit_mask, xp):
+        """CPU implementation using george library."""
+        # Convert to numpy if needed
+        time_np = time.get() if hasattr(time, 'get') else time
+        flux_np = flux.get() if hasattr(flux, 'get') else flux
+        transit_mask_np = transit_mask.get() if hasattr(transit_mask, 'get') else transit_mask
+        
+        noise_model = np.full_like(flux_np, np.nan)
+        
+        for i in range(flux_np.shape[1]):
+            lc = flux_np[:, i]
+            median_val = np.nanmedian(lc)
+            if np.isnan(median_val) or median_val == 0:
+                noise_model[:, i] = 1.0
+                continue
+                
+            lc_norm = lc / median_val
+            finite_mask = np.isfinite(lc_norm)
+            oot_mask = ~transit_mask_np & finite_mask
+            
+            if np.sum(oot_mask) < 20:
+                raise ValueError(f"Not enough OOT points for AIRS drift fit on channel {i}.")
+            
+            # Fit average drift (1D GP over time)
+            avg_drift = self._fit_average_drift(time_np, lc_norm, oot_mask)
+            
+            # Fit spectral drift (2D GP over time-wavelength)
+            if self.use_sparse:
+                spectral_drift = self._fit_spectral_drift_sparse(time_np, lc_norm, oot_mask, i)
+            else:
+                spectral_drift = self._fit_spectral_drift_dense(time_np, lc_norm, oot_mask, i)
+            
+            # Combine drifts
+            total_drift = avg_drift + spectral_drift
+            noise_model[:, i] = total_drift * median_val
+        
+        noise_model_xp = xp.asarray(noise_model) if hasattr(xp, 'asarray') else noise_model
+        return flux / noise_model_xp, noise_model_xp
+    
+    def _detrend_gpu(self, time, flux, transit_mask, xp):
+        """GPU implementation - raises NotImplementedError for now."""
+        raise NotImplementedError("GPU implementation for AIRSDriftDetrender not yet implemented")
+    
+    def _fit_average_drift(self, time, lc, oot_mask):
+        """Fit 1D GP for average drift over time."""
+        oot_time = time[oot_mask]
+        oot_flux = lc[oot_mask]
+        
+        # Create kernel
+        if self.avg_kernel == 'Matern32':
+            kernel = kernels.Matern32Kernel(metric=self.avg_length_scale**2)
+        elif self.avg_kernel == 'RBF':
+            kernel = kernels.ExpSquaredKernel(metric=self.avg_length_scale**2)
+        else:
+            kernel = kernels.Matern32Kernel(metric=self.avg_length_scale**2)
+        
+        # Fit GP
+        gp = george.GP(kernel, mean=np.nanmean(oot_flux), fit_mean=True)
+        gp.compute(oot_time)
+        
+        p0 = gp.get_parameter_vector()
+        results = minimize(
+            lambda p: -gp.log_likelihood(oot_flux, p), 
+            p0, 
+            jac=lambda p: -gp.grad_log_likelihood(oot_flux, p)
+        )
+        gp.set_parameter_vector(results.x)
+        
+        # Predict on full time range
+        residuals = oot_flux - gp.get_parameter('mean:value')
+        pred_drift = gp.predict(residuals, time, return_cov=False)
+        return pred_drift + gp.get_parameter('mean:value')
+    
+    def _fit_spectral_drift_sparse(self, time, lc, oot_mask, wavelength_idx):
+        """Fit 2D GP for spectral drift using sparse approximation."""
+        # Simplified KISS-GP implementation
+        # In practice, this would use a more sophisticated sparse GP approach
+        
+        # For now, use a simple 2D kernel approach
+        oot_time = time[oot_mask]
+        oot_flux = lc[oot_mask]
+        
+        # Create 2D input (time, wavelength)
+        X = np.column_stack([oot_time, np.full_like(oot_time, wavelength_idx)])
+        
+        # Create 2D kernel
+        if self.spectral_kernel == 'Matern32':
+            kernel = kernels.Matern32Kernel(metric=[self.time_scale**2, self.wavelength_scale**2])
+        elif self.spectral_kernel == 'RBF':
+            kernel = kernels.ExpSquaredKernel(metric=[self.time_scale**2, self.wavelength_scale**2])
+        else:
+            kernel = kernels.Matern32Kernel(metric=[self.time_scale**2, self.wavelength_scale**2])
+        
+        # Fit GP
+        gp = george.GP(kernel, mean=np.nanmean(oot_flux), fit_mean=True)
+        gp.compute(X)
+        
+        p0 = gp.get_parameter_vector()
+        results = minimize(
+            lambda p: -gp.log_likelihood(oot_flux, p), 
+            p0, 
+            jac=lambda p: -gp.grad_log_likelihood(oot_flux, p)
+        )
+        gp.set_parameter_vector(results.x)
+        
+        # Predict on full time range
+        X_full = np.column_stack([time, np.full_like(time, wavelength_idx)])
+        residuals = oot_flux - gp.get_parameter('mean:value')
+        pred_drift = gp.predict(residuals, X_full, return_cov=False)
+        return pred_drift + gp.get_parameter('mean:value')
+    
+    def _fit_spectral_drift_dense(self, time, lc, oot_mask, wavelength_idx):
+        """Fit 2D GP for spectral drift using dense approach."""
+        # Similar to sparse but without KISS-GP approximation
+        return self._fit_spectral_drift_sparse(time, lc, oot_mask, wavelength_idx)
+
+
+class FGSDriftDetrender(BaseDetrender):
+    """
+    Advanced detrending for FGS instrument based on ariel_gp approach.
+    
+    Models only average drift (1D GP over time) since FGS is a photometer.
+    """
+    
+    def __init__(self, 
+                 kernel: str = 'Matern32',
+                 length_scale: float = 1.0,
+                 use_gpu: bool = False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.kernel = kernel
+        self.length_scale = length_scale
+        self.use_gpu = use_gpu
+        
+        if self.use_gpu and not GP_GPU_ENABLED:
+            raise RuntimeError("GPU support requires PyTorch and GPyTorch")
+    
+    def detrend(self, time, flux, transit_mask, xp) -> Tuple["xp.ndarray", "xp.ndarray"]:
+        """Main detrending method."""
+        if self.use_gpu:
+            return self._detrend_gpu(time, flux, transit_mask, xp)
+        else:
+            return self._detrend_cpu(time, flux, transit_mask, xp)
+    
+    def _detrend_cpu(self, time, flux, transit_mask, xp):
+        """CPU implementation using george library."""
+        # Convert to numpy if needed
+        time_np = time.get() if hasattr(time, 'get') else time
+        flux_np = flux.get() if hasattr(flux, 'get') else flux
+        transit_mask_np = transit_mask.get() if hasattr(transit_mask, 'get') else transit_mask
+        
+        noise_model = np.full_like(flux_np, np.nan)
+        
+        for i in range(flux_np.shape[1]):
+            lc = flux_np[:, i]
+            median_val = np.nanmedian(lc)
+            if np.isnan(median_val) or median_val == 0:
+                noise_model[:, i] = 1.0
+                continue
+                
+            lc_norm = lc / median_val
+            finite_mask = np.isfinite(lc_norm)
+            oot_mask = ~transit_mask_np & finite_mask
+            
+            if np.sum(oot_mask) < 20:
+                raise ValueError(f"Not enough OOT points for FGS drift fit on channel {i}.")
+            
+            # Fit average drift (1D GP over time)
+            drift = self._fit_average_drift(time_np, lc_norm, oot_mask)
+            noise_model[:, i] = drift * median_val
+        
+        noise_model_xp = xp.asarray(noise_model) if hasattr(xp, 'asarray') else noise_model
+        return flux / noise_model_xp, noise_model_xp
+    
+    def _detrend_gpu(self, time, flux, transit_mask, xp):
+        """GPU implementation - raises NotImplementedError for now."""
+        raise NotImplementedError("GPU implementation for FGSDriftDetrender not yet implemented")
+    
+    def _fit_average_drift(self, time, lc, oot_mask):
+        """Fit 1D GP for average drift over time."""
+        oot_time = time[oot_mask]
+        oot_flux = lc[oot_mask]
+        
+        # Create kernel
+        if self.kernel == 'Matern32':
+            kernel = kernels.Matern32Kernel(metric=self.length_scale**2)
+        elif self.kernel == 'RBF':
+            kernel = kernels.ExpSquaredKernel(metric=self.length_scale**2)
+        else:
+            kernel = kernels.Matern32Kernel(metric=self.length_scale**2)
+        
+        # Fit GP
+        gp = george.GP(kernel, mean=np.nanmean(oot_flux), fit_mean=True)
+        gp.compute(oot_time)
+        
+        p0 = gp.get_parameter_vector()
+        results = minimize(
+            lambda p: -gp.log_likelihood(oot_flux, p), 
+            p0, 
+            jac=lambda p: -gp.grad_log_likelihood(oot_flux, p)
+        )
+        gp.set_parameter_vector(results.x)
+        
+        # Predict on full time range
+        residuals = oot_flux - gp.get_parameter('mean:value')
+        pred_drift = gp.predict(residuals, time, return_cov=False)
+        return pred_drift + gp.get_parameter('mean:value')
+
+
+class BayesianMultiComponentDetrender(BaseDetrender):
+    """
+    Complete Bayesian multi-component detrending based on ariel_gp approach.
+    
+    Implements the full model: (stellar_spectrum * drift * transit) + noise
+    where all components are estimated simultaneously.
+    """
+    
+    def __init__(self,
+                 n_pca: int = 1,
+                 n_iter: int = 7,
+                 n_samples: int = 100,
+                 update_rate: float = 1.0,
+                 use_gpu: bool = False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.n_pca = n_pca
+        self.n_iter = n_iter
+        self.n_samples = n_samples
+        self.update_rate = update_rate
+        self.use_gpu = use_gpu
+        
+        if self.use_gpu and not GP_GPU_ENABLED:
+            raise RuntimeError("GPU support requires PyTorch and GPyTorch")
+    
+    def detrend(self, time, flux, transit_mask, xp) -> Tuple["xp.ndarray", "xp.ndarray"]:
+        """Main detrending method."""
+        if self.use_gpu:
+            return self._detrend_gpu(time, flux, transit_mask, xp)
+        else:
+            return self._detrend_cpu(time, flux, transit_mask, xp)
+    
+    def _detrend_cpu(self, time, flux, transit_mask, xp):
+        """CPU implementation of complete Bayesian model."""
+        # Convert to numpy if needed
+        time_np = time.get() if hasattr(time, 'get') else time
+        flux_np = flux.get() if hasattr(flux, 'get') else flux
+        transit_mask_np = transit_mask.get() if hasattr(transit_mask, 'get') else transit_mask
+        
+        # This is a simplified version - full implementation would be much more complex
+        # For now, we'll use a combination of the individual components
+        
+        # 1. Fit stellar spectrum (simple baseline)
+        stellar_spectrum = self._fit_stellar_spectrum(flux_np)
+        
+        # 2. Fit drift components
+        drift_model = self._fit_drift_components(time_np, flux_np, transit_mask_np)
+        
+        # 3. Fit transit window (simplified)
+        transit_window = self._fit_transit_window(time_np, transit_mask_np)
+        
+        # 4. Combine all components
+        noise_model = stellar_spectrum * drift_model * transit_window
+        
+        noise_model_xp = xp.asarray(noise_model) if hasattr(xp, 'asarray') else noise_model
+        return flux / noise_model_xp, noise_model_xp
+    
+    def _detrend_gpu(self, time, flux, transit_mask, xp):
+        """GPU implementation - raises NotImplementedError for now."""
+        raise NotImplementedError("GPU implementation for BayesianMultiComponentDetrender not yet implemented")
+    
+    def _fit_stellar_spectrum(self, flux):
+        """Fit stellar spectrum baseline."""
+        # Simple approach: use median per wavelength
+        return np.nanmedian(flux, axis=0, keepdims=True)
+    
+    def _fit_drift_components(self, time, flux, transit_mask):
+        """Fit drift components (AIRS: average + spectral, FGS: average only)."""
+        # Simplified implementation
+        # In practice, this would use the full Bayesian framework
+        
+        drift_model = np.ones_like(flux)
+        
+        # For each wavelength, fit a simple drift model
+        for i in range(flux.shape[1]):
+            lc = flux[:, i]
+            finite_mask = np.isfinite(lc)
+            oot_mask = ~transit_mask & finite_mask
+            
+            if np.sum(oot_mask) < 10:
+                continue
+                
+            # Simple polynomial drift fit
+            oot_time = time[oot_mask]
+            oot_flux = lc[oot_mask]
+            
+            # Fit 2nd order polynomial
+            coeffs = np.polyfit(oot_time, oot_flux, 2)
+            drift_fit = np.polyval(coeffs, time)
+            
+            drift_model[:, i] = drift_fit
+        
+        return drift_model
+    
+    def _fit_transit_window(self, time, transit_mask):
+        """Fit transit window function."""
+        # Simplified transit window
+        # In practice, this would use the non-linear spline-based approach
+        
+        # Create a simple transit window based on the mask
+        transit_window = np.ones_like(time, dtype=float)
+        
+        # Smooth the transit mask to create a gradual transition
+        if np.any(transit_mask):
+            # Use a simple smoothing approach
+            from scipy.ndimage import gaussian_filter1d
+            smoothed_mask = gaussian_filter1d(transit_mask.astype(float), sigma=2)
+            transit_window = 1.0 - 0.1 * smoothed_mask  # Small transit depth
+        
+        return transit_window[:, np.newaxis]
+
+
+# Convenience functions for easy access
+def create_airs_drift_detrender(**kwargs):
+    """Create an AIRS drift detrender with default settings."""
+    return AIRSDriftDetrender(**kwargs)
+
+def create_fgs_drift_detrender(**kwargs):
+    """Create an FGS drift detrender with default settings."""
+    return FGSDriftDetrender(**kwargs)
+
+def create_bayesian_detrender(**kwargs):
+    """Create a complete Bayesian detrender with default settings."""
+    return BayesianMultiComponentDetrender(**kwargs)

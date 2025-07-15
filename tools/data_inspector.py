@@ -7,7 +7,7 @@ sys.path.insert(0, str(project_root))
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
-    QPushButton, QSlider, QLabel, QGroupBox, QCheckBox, QSpinBox, QStatusBar,
+    QPushButton, QSlider, QLabel, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, QStatusBar,
     QTextEdit, QTabWidget, QStackedWidget
 )
 from PyQt6.QtCore import Qt
@@ -23,6 +23,13 @@ from arielml.data.observation import DataObservation
 from arielml.data import loaders, detrending
 from arielml.config import DATASET_DIR, PHOTOMETRY_APERTURES
 from arielml.backend import GPU_ENABLED, GP_GPU_ENABLED
+
+# Check if sklearn GP is available
+try:
+    from sklearn.gaussian_process import GaussianProcessRegressor
+    SKLEARN_GP_ENABLED = True
+except ImportError:
+    SKLEARN_GP_ENABLED = False
 
 class DataInspector(QMainWindow):
     """
@@ -140,12 +147,59 @@ class DataInspector(QMainWindow):
         
         # --- Dropdown for model selection ---
         self.detrend_model_combo = QComboBox()
-        detrend_options = [
-            "Polynomial", "Savitzky-Golay", "GP (george CPU)", "Hybrid GP (CPU)"
-        ]
+        
+        # Build detrending options based on available backends
+        detrend_options = []
+        
+        # Always available (CPU)
+        detrend_options.extend([
+            "Polynomial",
+            "Savitzky-Golay", 
+            "GP (george CPU) ⚠️ Very Slow",
+            "Hybrid GP (CPU)"
+        ])
+        
+        # GPU options (if available)
         if GP_GPU_ENABLED: 
-            detrend_options.extend(["GP (GPyTorch GPU)", "Hybrid GP (GPU)"])
-        self.detrend_model_combo.addItems(sorted(detrend_options))
+            detrend_options.extend([
+                "GP (GPyTorch GPU)",
+                "Hybrid GP (GPU)"
+            ])
+        else:
+            detrend_options.extend([
+                "GP (GPyTorch GPU) ❌ Not Implemented",
+                "Hybrid GP (GPU) ❌ Not Implemented"
+            ])
+        
+        # Advanced models (if sklearn available)
+        if SKLEARN_GP_ENABLED:
+            detrend_options.extend([
+                "Advanced GP (2-Step)",
+                "Multi-Kernel GP", 
+                "Transit Window GP"
+            ])
+        
+        # ariel_gp-style models
+        detrend_options.extend([
+            "AIRS Drift (CPU)",
+            "FGS Drift (CPU)", 
+            "Bayesian Multi-Component (CPU)"
+        ])
+        
+        if GP_GPU_ENABLED:
+            detrend_options.extend([
+                "AIRS Drift (GPU)",
+                "FGS Drift (GPU)",
+                "Bayesian Multi-Component (GPU)"
+            ])
+        else:
+            detrend_options.extend([
+                "AIRS Drift (GPU) ❌ Not Implemented",
+                "FGS Drift (GPU) ❌ Not Implemented", 
+                "Bayesian Multi-Component (GPU) ❌ Not Implemented"
+            ])
+        
+        self.detrend_model_combo.addItems(detrend_options)
         self.detrend_model_combo.currentTextChanged.connect(self.on_detrend_model_change)
         layout.addWidget(self.detrend_model_combo)
 
@@ -219,6 +273,195 @@ class DataInspector(QMainWindow):
         self.model_widget_map["Hybrid GP (CPU)"] = self.detrend_params_stack.addWidget(hybrid_widget)
         if GP_GPU_ENABLED:
              self.model_widget_map["Hybrid GP (GPU)"] = self.detrend_params_stack.indexOf(hybrid_widget)
+        
+        # Advanced GP (2-Step) parameters
+        if SKLEARN_GP_ENABLED:
+            advanced_widget = QWidget()
+            advanced_layout = QVBoxLayout(advanced_widget)
+            
+            # Drift kernel
+            drift_kernel_layout = QHBoxLayout()
+            drift_kernel_layout.addWidget(QLabel("Drift Kernel:"))
+            self.advanced_drift_kernel_combo = QComboBox()
+            self.advanced_drift_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
+            drift_kernel_layout.addWidget(self.advanced_drift_kernel_combo)
+            advanced_layout.addLayout(drift_kernel_layout)
+            
+            # Depth kernel
+            depth_kernel_layout = QHBoxLayout()
+            depth_kernel_layout.addWidget(QLabel("Depth Kernel:"))
+            self.advanced_depth_kernel_combo = QComboBox()
+            self.advanced_depth_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
+            self.advanced_depth_kernel_combo.setCurrentText('Matern32')
+            depth_kernel_layout.addWidget(self.advanced_depth_kernel_combo)
+            advanced_layout.addLayout(depth_kernel_layout)
+            
+            # Noise level
+            noise_layout = QHBoxLayout()
+            noise_layout.addWidget(QLabel("Noise Level:"))
+            self.advanced_noise_spinbox = QDoubleSpinBox()
+            self.advanced_noise_spinbox.setRange(0.01, 1.0)
+            self.advanced_noise_spinbox.setValue(0.1)
+            self.advanced_noise_spinbox.setSingleStep(0.01)
+            noise_layout.addWidget(self.advanced_noise_spinbox)
+            advanced_layout.addLayout(noise_layout)
+            
+            self.model_widget_map["Advanced GP (2-Step)"] = self.detrend_params_stack.addWidget(advanced_widget)
+            
+            # Multi-Kernel GP parameters
+            multikernel_widget = QWidget()
+            multikernel_layout = QVBoxLayout(multikernel_widget)
+            
+            # Average kernel
+            avg_kernel_layout = QHBoxLayout()
+            avg_kernel_layout.addWidget(QLabel("Average Kernel:"))
+            self.multikernel_avg_kernel_combo = QComboBox()
+            self.multikernel_avg_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
+            avg_kernel_layout.addWidget(self.multikernel_avg_kernel_combo)
+            multikernel_layout.addLayout(avg_kernel_layout)
+            
+            # Spectral kernel
+            spec_kernel_layout = QHBoxLayout()
+            spec_kernel_layout.addWidget(QLabel("Spectral Kernel:"))
+            self.multikernel_spec_kernel_combo = QComboBox()
+            self.multikernel_spec_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
+            self.multikernel_spec_kernel_combo.setCurrentText('Matern32')
+            spec_kernel_layout.addWidget(self.multikernel_spec_kernel_combo)
+            multikernel_layout.addLayout(spec_kernel_layout)
+            
+            # Sparse approximation
+            sparse_layout = QHBoxLayout()
+            self.multikernel_sparse_checkbox = QCheckBox("Use Sparse Approximation")
+            self.multikernel_sparse_checkbox.setChecked(True)
+            sparse_layout.addWidget(self.multikernel_sparse_checkbox)
+            multikernel_layout.addLayout(sparse_layout)
+            
+            self.model_widget_map["Multi-Kernel GP"] = self.detrend_params_stack.addWidget(multikernel_widget)
+            
+            # Transit Window GP parameters
+            transit_window_widget = QWidget()
+            transit_window_layout = QVBoxLayout(transit_window_widget)
+            
+            # Transit kernel
+            transit_kernel_layout = QHBoxLayout()
+            transit_kernel_layout.addWidget(QLabel("Transit Kernel:"))
+            self.transit_window_kernel_combo = QComboBox()
+            self.transit_window_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
+            self.transit_window_kernel_combo.setCurrentText('Matern32')
+            transit_kernel_layout.addWidget(self.transit_window_kernel_combo)
+            transit_window_layout.addLayout(transit_kernel_layout)
+            
+            # Drift kernel
+            transit_drift_kernel_layout = QHBoxLayout()
+            transit_drift_kernel_layout.addWidget(QLabel("Drift Kernel:"))
+            self.transit_window_drift_kernel_combo = QComboBox()
+            self.transit_window_drift_kernel_combo.addItems(['RBF', 'Matern32', 'Matern52'])
+            transit_drift_kernel_layout.addWidget(self.transit_window_drift_kernel_combo)
+            transit_window_layout.addLayout(transit_drift_kernel_layout)
+            
+            self.model_widget_map["Transit Window GP"] = self.detrend_params_stack.addWidget(transit_window_widget)
+            
+            # AIRS Drift parameters
+            airs_widget = QWidget()
+            airs_layout = QVBoxLayout(airs_widget)
+            
+            # Average drift parameters
+            avg_layout = QHBoxLayout()
+            avg_layout.addWidget(QLabel("Avg Kernel:"))
+            self.airs_avg_kernel_combo = QComboBox()
+            self.airs_avg_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
+            avg_layout.addWidget(self.airs_avg_kernel_combo)
+            avg_layout.addWidget(QLabel("Length Scale:"))
+            self.airs_avg_length_spinbox = QDoubleSpinBox()
+            self.airs_avg_length_spinbox.setRange(0.1, 10.0)
+            self.airs_avg_length_spinbox.setValue(1.0)
+            self.airs_avg_length_spinbox.setSingleStep(0.1)
+            avg_layout.addWidget(self.airs_avg_length_spinbox)
+            airs_layout.addLayout(avg_layout)
+            
+            # Spectral drift parameters
+            spec_layout = QHBoxLayout()
+            spec_layout.addWidget(QLabel("Spectral Kernel:"))
+            self.airs_spec_kernel_combo = QComboBox()
+            self.airs_spec_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
+            spec_layout.addWidget(self.airs_spec_kernel_combo)
+            spec_layout.addWidget(QLabel("Time Scale:"))
+            self.airs_time_scale_spinbox = QDoubleSpinBox()
+            self.airs_time_scale_spinbox.setRange(0.1, 10.0)
+            self.airs_time_scale_spinbox.setValue(0.4)
+            self.airs_time_scale_spinbox.setSingleStep(0.1)
+            spec_layout.addWidget(self.airs_time_scale_spinbox)
+            spec_layout.addWidget(QLabel("Wavelength Scale:"))
+            self.airs_wl_scale_spinbox = QDoubleSpinBox()
+            self.airs_wl_scale_spinbox.setRange(0.01, 1.0)
+            self.airs_wl_scale_spinbox.setValue(0.05)
+            self.airs_wl_scale_spinbox.setSingleStep(0.01)
+            spec_layout.addWidget(self.airs_wl_scale_spinbox)
+            airs_layout.addLayout(spec_layout)
+            
+            # Sparse approximation
+            sparse_layout = QHBoxLayout()
+            self.airs_sparse_checkbox = QCheckBox("Use Sparse Approximation")
+            self.airs_sparse_checkbox.setChecked(True)
+            sparse_layout.addWidget(self.airs_sparse_checkbox)
+            airs_layout.addLayout(sparse_layout)
+            
+            self.model_widget_map["AIRS Drift (CPU)"] = self.detrend_params_stack.addWidget(airs_widget)
+            if GP_GPU_ENABLED:
+                self.model_widget_map["AIRS Drift (GPU)"] = self.detrend_params_stack.indexOf(airs_widget)
+            
+            # FGS Drift parameters
+            fgs_widget = QWidget()
+            fgs_layout = QHBoxLayout(fgs_widget)
+            fgs_layout.addWidget(QLabel("Kernel:"))
+            self.fgs_kernel_combo = QComboBox()
+            self.fgs_kernel_combo.addItems(['Matern32', 'RBF', 'Matern52'])
+            fgs_layout.addWidget(self.fgs_kernel_combo)
+            fgs_layout.addWidget(QLabel("Length Scale:"))
+            self.fgs_length_spinbox = QDoubleSpinBox()
+            self.fgs_length_spinbox.setRange(0.1, 10.0)
+            self.fgs_length_spinbox.setValue(1.0)
+            self.fgs_length_spinbox.setSingleStep(0.1)
+            fgs_layout.addWidget(self.fgs_length_spinbox)
+            
+            self.model_widget_map["FGS Drift (CPU)"] = self.detrend_params_stack.addWidget(fgs_widget)
+            if GP_GPU_ENABLED:
+                self.model_widget_map["FGS Drift (GPU)"] = self.detrend_params_stack.indexOf(fgs_widget)
+            
+            # Bayesian Multi-Component parameters
+            bayesian_widget = QWidget()
+            bayesian_layout = QVBoxLayout(bayesian_widget)
+            
+            # PCA components
+            pca_layout = QHBoxLayout()
+            pca_layout.addWidget(QLabel("PCA Components:"))
+            self.bayesian_pca_spinbox = QSpinBox()
+            self.bayesian_pca_spinbox.setRange(0, 5)
+            self.bayesian_pca_spinbox.setValue(1)
+            pca_layout.addWidget(self.bayesian_pca_spinbox)
+            bayesian_layout.addLayout(pca_layout)
+            
+            # Iterations
+            iter_layout = QHBoxLayout()
+            iter_layout.addWidget(QLabel("Iterations:"))
+            self.bayesian_iter_spinbox = QSpinBox()
+            self.bayesian_iter_spinbox.setRange(1, 20)
+            self.bayesian_iter_spinbox.setValue(7)
+            iter_layout.addWidget(self.bayesian_iter_spinbox)
+            bayesian_layout.addLayout(iter_layout)
+            
+            # Samples
+            samples_layout = QHBoxLayout()
+            samples_layout.addWidget(QLabel("Samples:"))
+            self.bayesian_samples_spinbox = QSpinBox()
+            self.bayesian_samples_spinbox.setRange(10, 1000)
+            self.bayesian_samples_spinbox.setValue(100)
+            samples_layout.addWidget(self.bayesian_samples_spinbox)
+            bayesian_layout.addLayout(samples_layout)
+            
+            self.model_widget_map["Bayesian Multi-Component (CPU)"] = self.detrend_params_stack.addWidget(bayesian_widget)
+            if GP_GPU_ENABLED:
+                self.model_widget_map["Bayesian Multi-Component (GPU)"] = self.detrend_params_stack.indexOf(bayesian_widget)
 
         layout.addWidget(self.detrend_params_stack)
         detrend_group.setLayout(layout)
@@ -321,14 +564,127 @@ class DataInspector(QMainWindow):
         self.statusBar().showMessage("Pipeline finished.", 5000)
 
     def _get_detrender(self, model_name):
-        if model_name == "Polynomial": return detrending.PolynomialDetrender(degree=self.poly_degree_spinbox.value())
-        elif model_name == "Savitzky-Golay": return detrending.SavGolDetrender(window_length=self.savgol_window_spinbox.value(), polyorder=self.savgol_order_spinbox.value())
-        elif model_name == "GP (george CPU)": return detrending.GPDetrender(kernel=self.george_kernel_combo.currentText())
+        # Check for not implemented methods
+        if "❌ Not Implemented" in model_name:
+            self.statusBar().showMessage("This method is not implemented yet.", 5000)
+            return None
+            
+        # Basic methods
+        if model_name == "Polynomial": 
+            return detrending.PolynomialDetrender(degree=self.poly_degree_spinbox.value())
+        elif model_name == "Savitzky-Golay": 
+            return detrending.SavGolDetrender(window_length=self.savgol_window_spinbox.value(), polyorder=self.savgol_order_spinbox.value())
+        elif model_name == "GP (george CPU) ⚠️ Very Slow": 
+            return detrending.GPDetrender(kernel=self.george_kernel_combo.currentText())
         elif model_name == "GP (GPyTorch GPU)":
-            if GP_GPU_ENABLED: self.statusBar().showMessage("Running GPyTorch Detrending (GPU)...", 30000); QApplication.processEvents(); return detrending.GPyTorchDetrender(training_iter=self.gpytorch_iter_spinbox.value())
-        elif model_name == "Hybrid GP (CPU)": return detrending.HybridDetrender(use_gpu=False, training_iter=self.hybrid_iter_spinbox.value(), poly_degree=self.hybrid_poly_degree_spinbox.value())
+            if GP_GPU_ENABLED: 
+                self.statusBar().showMessage("Running GPyTorch Detrending (GPU)...", 30000)
+                QApplication.processEvents()
+                return detrending.GPyTorchDetrender(training_iter=self.gpytorch_iter_spinbox.value())
+        elif model_name == "Hybrid GP (CPU)": 
+            return detrending.HybridDetrender(use_gpu=False, training_iter=self.hybrid_iter_spinbox.value(), poly_degree=self.hybrid_poly_degree_spinbox.value())
         elif model_name == "Hybrid GP (GPU)":
-            if GP_GPU_ENABLED: self.statusBar().showMessage("Running Hybrid GP Detrending (GPU)...", 30000); QApplication.processEvents(); return detrending.HybridDetrender(use_gpu=True, training_iter=self.hybrid_iter_spinbox.value(), poly_degree=self.hybrid_poly_degree_spinbox.value())
+            if GP_GPU_ENABLED: 
+                self.statusBar().showMessage("Running Hybrid GP Detrending (GPU)...", 30000)
+                QApplication.processEvents()
+                return detrending.HybridDetrender(use_gpu=True, training_iter=self.hybrid_iter_spinbox.value(), poly_degree=self.hybrid_poly_degree_spinbox.value())
+        
+        # Advanced sklearn methods
+        elif model_name == "Advanced GP (2-Step)":
+            if SKLEARN_GP_ENABLED: 
+                self.statusBar().showMessage("Running Advanced GP Detrending (2-Step)...", 30000)
+                QApplication.processEvents()
+                return detrending.AdvancedGPDetrender(
+                    drift_kernel=self.advanced_drift_kernel_combo.currentText(),
+                    depth_kernel=self.advanced_depth_kernel_combo.currentText(),
+                    noise_level=self.advanced_noise_spinbox.value()
+                )
+        elif model_name == "Multi-Kernel GP":
+            if SKLEARN_GP_ENABLED:
+                self.statusBar().showMessage("Running Multi-Kernel GP Detrending...", 30000)
+                QApplication.processEvents()
+                return detrending.MultiKernelDetrender(
+                    average_kernel=self.multikernel_avg_kernel_combo.currentText(),
+                    spectral_kernel=self.multikernel_spec_kernel_combo.currentText(),
+                    use_sparse=self.multikernel_sparse_checkbox.isChecked()
+                )
+        elif model_name == "Transit Window GP":
+            if SKLEARN_GP_ENABLED:
+                self.statusBar().showMessage("Running Transit Window GP Detrending...", 30000)
+                QApplication.processEvents()
+                return detrending.TransitWindowDetrender(
+                    transit_kernel=self.transit_window_kernel_combo.currentText(),
+                    drift_kernel=self.transit_window_drift_kernel_combo.currentText()
+                )
+        
+        # ariel_gp-style methods
+        elif model_name == "AIRS Drift (CPU)":
+            self.statusBar().showMessage("Running AIRS Drift Detrending (CPU)...", 30000)
+            QApplication.processEvents()
+            return detrending.AIRSDriftDetrender(
+                use_gpu=False,
+                avg_kernel=self.airs_avg_kernel_combo.currentText(),
+                avg_length_scale=self.airs_avg_length_spinbox.value(),
+                spectral_kernel=self.airs_spec_kernel_combo.currentText(),
+                time_scale=self.airs_time_scale_spinbox.value(),
+                wavelength_scale=self.airs_wl_scale_spinbox.value(),
+                use_sparse=self.airs_sparse_checkbox.isChecked()
+            )
+        
+        elif model_name == "AIRS Drift (GPU)":
+            if GP_GPU_ENABLED:
+                self.statusBar().showMessage("Running AIRS Drift Detrending (GPU)...", 30000)
+                QApplication.processEvents()
+                return detrending.AIRSDriftDetrender(
+                    use_gpu=True,
+                    avg_kernel=self.airs_avg_kernel_combo.currentText(),
+                    avg_length_scale=self.airs_avg_length_spinbox.value(),
+                    spectral_kernel=self.airs_spec_kernel_combo.currentText(),
+                    time_scale=self.airs_time_scale_spinbox.value(),
+                    wavelength_scale=self.airs_wl_scale_spinbox.value(),
+                    use_sparse=self.airs_sparse_checkbox.isChecked()
+                )
+        
+        elif model_name == "FGS Drift (CPU)":
+            self.statusBar().showMessage("Running FGS Drift Detrending (CPU)...", 30000)
+            QApplication.processEvents()
+            return detrending.FGSDriftDetrender(
+                use_gpu=False,
+                kernel=self.fgs_kernel_combo.currentText(),
+                length_scale=self.fgs_length_spinbox.value()
+            )
+        
+        elif model_name == "FGS Drift (GPU)":
+            if GP_GPU_ENABLED:
+                self.statusBar().showMessage("Running FGS Drift Detrending (GPU)...", 30000)
+                QApplication.processEvents()
+                return detrending.FGSDriftDetrender(
+                    use_gpu=True,
+                    kernel=self.fgs_kernel_combo.currentText(),
+                    length_scale=self.fgs_length_spinbox.value()
+                )
+        
+        elif model_name == "Bayesian Multi-Component (CPU)":
+            self.statusBar().showMessage("Running Bayesian Multi-Component Detrending (CPU)...", 60000)
+            QApplication.processEvents()
+            return detrending.BayesianMultiComponentDetrender(
+                use_gpu=False,
+                n_pca=self.bayesian_pca_spinbox.value(),
+                n_iter=self.bayesian_iter_spinbox.value(),
+                n_samples=self.bayesian_samples_spinbox.value()
+            )
+        
+        elif model_name == "Bayesian Multi-Component (GPU)":
+            if GP_GPU_ENABLED:
+                self.statusBar().showMessage("Running Bayesian Multi-Component Detrending (GPU)...", 60000)
+                QApplication.processEvents()
+                return detrending.BayesianMultiComponentDetrender(
+                    use_gpu=True,
+                    n_pca=self.bayesian_pca_spinbox.value(),
+                    n_iter=self.bayesian_iter_spinbox.value(),
+                    n_samples=self.bayesian_samples_spinbox.value()
+                )
+        
         return None
 
     # --- Plotting and UI Updates ---
