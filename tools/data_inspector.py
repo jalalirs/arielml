@@ -88,46 +88,91 @@ class DataLoadingWorker(QThread):
 class PipelineWorker(QThread):
     """Worker thread for running the pipeline asynchronously."""
     
-    progress_signal = pyqtSignal(DetrendingProgress)
+    progress_signal = pyqtSignal(str)  # Simple string messages for pipeline steps
     finished_signal = pyqtSignal()
     error_signal = pyqtSignal(str)
     
-    def __init__(self, observation, detrender, mask_method="empirical"):
+    def __init__(self, observation, detrender, mask_method="empirical", steps_to_run=None, n_bins=100):
         super().__init__()
         self.observation = observation
         self.detrender = detrender
         self.mask_method = mask_method
+        self.steps_to_run = steps_to_run
+        self.n_bins = n_bins
         self._should_stop = False
     
     def run(self):
         """Run the pipeline in a separate thread."""
         try:
-            # Connect the detrender's progress signals to our signal
-            self.detrender.add_observer(self._on_progress)
+            print("DEBUG: Starting pipeline in worker thread")
             
-            # Run the detrending
-            self.observation.run_detrending(self.detrender, mask_method=self.mask_method)
+            # Run calibration
+            print("DEBUG: Running calibration...")
+            self.progress_signal.emit("Running calibration...")
+            self.check_stop()
+            self.observation.run_calibration_pipeline(self.steps_to_run)
+            print("DEBUG: Calibration completed")
+            
+            # Run photometry
+            print("DEBUG: Running photometry...")
+            self.progress_signal.emit("Running photometry...")
+            self.check_stop()
+            self.observation.run_photometry()
+            print("DEBUG: Photometry completed")
+            
+            # Run detrending if detrender is provided
+            if self.detrender:
+                print(f"DEBUG: Running detrending with {self.detrender.__class__.__name__}...")
+                self.progress_signal.emit("Running detrending...")
+                self.check_stop()
+                
+                # Connect the detrender's progress signals to our signal
+                if hasattr(self.detrender, 'add_observer'):
+                    self.detrender.add_observer(self._on_detrending_progress)
+                
+                # Run the detrending
+                self.observation.run_detrending(self.detrender, mask_method=self.mask_method)
+                print("DEBUG: Detrending completed")
+                
+                # Clean up observer
+                if hasattr(self.detrender, 'remove_observer'):
+                    self.detrender.remove_observer(self._on_detrending_progress)
+            else:
+                print("DEBUG: No detrender provided, skipping detrending")
+            
+            # Run phase folding
+            print("DEBUG: Running phase folding...")
+            self.progress_signal.emit("Running phase folding...")
+            self.check_stop()
+            self.observation.run_phase_folding(n_bins=self.n_bins)
+            print("DEBUG: Phase folding completed")
             
             # Final check before emitting success
-            if self._should_stop:
-                raise InterruptedError("Operation stopped by user")
+            self.check_stop()
             
+            print("DEBUG: Pipeline completed successfully")
             # Emit finished signal
             self.finished_signal.emit()
             
         except InterruptedError:
+            print("DEBUG: Pipeline interrupted by user")
             # Operation was stopped by user - don't emit error
             pass
         except Exception as e:
+            print(f"DEBUG: Pipeline error: {e}")
             self.error_signal.emit(str(e))
-        finally:
-            # Clean up observer
-            if hasattr(self.detrender, 'remove_observer'):
-                self.detrender.remove_observer(self._on_progress)
     
-    def _on_progress(self, progress: DetrendingProgress):
+    def _on_detrending_progress(self, progress):
         """Handle progress updates from the detrender."""
-        self.progress_signal.emit(progress)
+        if hasattr(progress, 'message'):
+            self.progress_signal.emit(progress.message)
+        else:
+            self.progress_signal.emit("Detrending...")
+    
+    def check_stop(self):
+        """Check if a stop has been requested."""
+        if self._should_stop:
+            raise InterruptedError("Operation stopped by user")
     
     def stop(self):
         """Request the worker to stop."""
@@ -549,41 +594,28 @@ class DataInspector(QMainWindow):
             self.statusBar().showMessage("Please load data first.", 5000)
             return
         
-        # Run calibration and photometry synchronously (fast operations)
-        try:
-            steps_to_run = {name: cb.isChecked() for name, cb in self.calib_checkboxes.items()}
-            self.observation.run_calibration_pipeline(steps_to_run)
-            self.observation.run_photometry()
-        except (ValueError, RuntimeError) as e:
-            self.statusBar().showMessage(f"ERROR: {e}", 15000)
-            print(f"ERROR: {e}")
-            return
+        # Set UI to busy state
+        self._set_ui_busy(True, "pipeline")
         
-        # Run detrending asynchronously with progress tracking
+        # Get pipeline parameters
+        steps_to_run = {name: cb.isChecked() for name, cb in self.calib_checkboxes.items()}
         mask_method = self.mask_method_combo.currentText()
         detrender = self._get_detrender(self.detrend_model_combo.currentText())
         
-        if detrender and hasattr(detrender, 'add_observer'):
-            # Use worker thread for detrending with progress tracking
-            self._run_detrending_async(detrender, mask_method)
-        else:
-            # Fall back to synchronous execution for simple detrenders
-            try:
-                # Set UI to busy state briefly
-                self._set_ui_busy(True, "pipeline")
-                
-                if detrender:
-                    self.observation.run_detrending(detrender, mask_method=mask_method)
-                self.observation.run_phase_folding(n_bins=self.bins_spinbox.value())
-                self._update_all_plots()
-                
-                # Set UI to idle state
-                self._set_ui_busy(False)
-                self.statusBar().showMessage("Pipeline finished.", 5000)
-            except (ValueError, RuntimeError) as e:
-                self._set_ui_busy(False)
-                self.statusBar().showMessage(f"ERROR: {e}", 15000)
-                print(f"ERROR: {e}")
+        # Run entire pipeline asynchronously
+        self._run_pipeline_async(detrender, mask_method, steps_to_run)
+    
+    def _run_pipeline_async(self, detrender, mask_method, steps_to_run):
+        """Run entire pipeline asynchronously with progress tracking."""
+        # Create and start worker
+        self.worker = PipelineWorker(
+            self.observation, detrender, mask_method, steps_to_run, 
+            n_bins=self.bins_spinbox.value()
+        )
+        self.worker.progress_signal.connect(self._on_pipeline_progress)
+        self.worker.finished_signal.connect(self._on_pipeline_finished)
+        self.worker.error_signal.connect(self._on_pipeline_error)
+        self.worker.start()
     
     def _run_detrending_async(self, detrender, mask_method):
         """Run detrending asynchronously with progress tracking."""
@@ -596,6 +628,68 @@ class DataInspector(QMainWindow):
         self.worker.finished_signal.connect(self._on_detrending_finished)
         self.worker.error_signal.connect(self._on_detrending_error)
         self.worker.start()
+    
+    def _on_pipeline_progress(self, message: str):
+        """Handle progress updates from the pipeline worker."""
+        # Update progress label
+        self.progress_label.setText(message)
+        
+        # Update status bar
+        self.statusBar().showMessage(message, 1000)
+        
+        # Update progress bar based on message
+        if "calibration" in message.lower():
+            self.progress_bar.setValue(25)
+        elif "photometry" in message.lower():
+            self.progress_bar.setValue(50)
+        elif "detrending" in message.lower():
+            self.progress_bar.setValue(75)
+        elif "phase folding" in message.lower():
+            self.progress_bar.setValue(90)
+    
+    def _on_pipeline_finished(self):
+        """Handle completion of the pipeline."""
+        try:
+            # Update progress for plotting
+            self.progress_bar.setValue(95)
+            self.progress_label.setText("Updating plots...")
+            
+            # Update plots
+            self._update_all_plots()
+            
+            # Complete
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("Pipeline completed")
+            
+            # Set UI to idle state
+            self._set_ui_busy(False)
+            
+            self.statusBar().showMessage("Pipeline finished.", 5000)
+            
+        except Exception as e:
+            self._on_pipeline_error(str(e))
+        finally:
+            # Clean up worker
+            if self.worker:
+                self.worker.deleteLater()
+                self.worker = None
+    
+    def _on_pipeline_error(self, error_message: str):
+        """Handle errors during pipeline execution."""
+        # Set UI to idle state
+        self._set_ui_busy(False)
+        
+        # Show error (but not for user stops)
+        if "stopped by user" not in error_message.lower():
+            self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
+            print(f"ERROR: {error_message}")
+        else:
+            self.statusBar().showMessage("Pipeline stopped by user", 5000)
+        
+        # Clean up worker
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
     
     def _on_detrending_progress(self, progress: DetrendingProgress):
         """Handle progress updates from the detrender."""
@@ -614,11 +708,23 @@ class DataInspector(QMainWindow):
     def _on_detrending_finished(self):
         """Handle completion of detrending."""
         try:
+            # Update progress for phase folding
+            self.progress_bar.setValue(80)
+            self.progress_label.setText("Running phase folding...")
+            
             # Run phase folding
             self.observation.run_phase_folding(n_bins=self.bins_spinbox.value())
             
+            # Update progress for plotting
+            self.progress_bar.setValue(90)
+            self.progress_label.setText("Updating plots...")
+            
             # Update plots
             self._update_all_plots()
+            
+            # Complete
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("Pipeline completed")
             
             # Set UI to idle state
             self._set_ui_busy(False)
@@ -653,14 +759,9 @@ class DataInspector(QMainWindow):
     def _set_ui_busy(self, busy: bool, operation: str = "processing"):
         """Set UI to busy or idle state."""
         if busy:
-            # Disable all interactive elements
+            # Only disable buttons to prevent double-clicks, keep configuration accessible
             self.load_button.setEnabled(False)
             self.apply_button.setEnabled(False)
-            self.split_combo.setEnabled(False)
-            self.planet_combo.setEnabled(False)
-            self.obs_combo.setEnabled(False)
-            self.instrument_combo.setEnabled(False)
-            self.backend_combo.setEnabled(False)
             
             # Show progress UI
             self.progress_bar.setVisible(True)
@@ -672,14 +773,9 @@ class DataInspector(QMainWindow):
             self.progress_label.setText(f"Starting {operation}...")
             
         else:
-            # Enable all interactive elements
+            # Enable buttons
             self.load_button.setEnabled(True)
             self.apply_button.setEnabled(True)
-            self.split_combo.setEnabled(True)
-            self.planet_combo.setEnabled(True)
-            self.obs_combo.setEnabled(True)
-            self.instrument_combo.setEnabled(True)
-            self.backend_combo.setEnabled(True)
             
             # Hide progress UI
             self.progress_bar.setVisible(False)
@@ -689,13 +785,13 @@ class DataInspector(QMainWindow):
     def stop_pipeline(self):
         """Stop the currently running pipeline and safely abort all changes."""
         if self.worker and self.worker.isRunning():
-            # Stop detrending worker
+            # Stop pipeline worker
             self.worker.stop()
             self.worker.wait()  # Wait for thread to finish
             
-            # Safely abort detrending changes
-            self._abort_detrending_changes()
-            self._on_detrending_error("Pipeline stopped by user")
+            # Safely abort pipeline changes
+            self._abort_pipeline_changes()
+            self._on_pipeline_error("Pipeline stopped by user")
             
         elif self.loading_worker and self.loading_worker.isRunning():
             # Stop loading worker
@@ -705,6 +801,23 @@ class DataInspector(QMainWindow):
             # Safely abort loading changes
             self._abort_loading_changes()
             self._on_loading_error("Data loading stopped by user")
+    
+    def _abort_pipeline_changes(self):
+        """Safely abort any partial pipeline changes."""
+        if self.observation and self.observation.is_loaded:
+            # Clear any partial pipeline results
+            if hasattr(self.observation, 'detrended_light_curves'):
+                self.observation.detrended_light_curves = None
+            if hasattr(self.observation, 'noise_models'):
+                self.observation.noise_models = None
+            if hasattr(self.observation, 'phase_folded_lc'):
+                self.observation.phase_folded_lc = None
+            
+            # Ensure we're back to a clean state
+            self._ensure_clean_state()
+            
+            # Update plots to show original data
+            self._update_all_plots()
     
     def _abort_detrending_changes(self):
         """Safely abort any partial detrending changes."""

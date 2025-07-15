@@ -39,14 +39,20 @@ class PolynomialDetrender(BaseDetrender):
         self.degree = degree
 
     def detrend(self, time, flux, transit_mask, xp):
+        print(f"DEBUG: PolynomialDetrender.detrend() called with degree={self.degree}")
+        print(f"DEBUG: Input shapes - time: {time.shape}, flux: {flux.shape}, transit_mask: {transit_mask.shape}")
+        
         noise_model = xp.full_like(flux, xp.nan)
         for i in range(flux.shape[1]):
+            print(f"DEBUG: Processing wavelength channel {i+1}/{flux.shape[1]}")
             lc, finite_mask = flux[:, i], xp.isfinite(flux[:, i])
             oot_mask = ~transit_mask & finite_mask
             if xp.sum(oot_mask) < self.degree + 1:
                 raise ValueError(f"Not enough OOT points for Polynomial fit on channel {i}.")
             poly_coeffs = xp.polyfit(time[oot_mask], lc[oot_mask], self.degree)
             noise_model[:, i] = xp.polyval(poly_coeffs, time)
+        
+        print("DEBUG: PolynomialDetrender.detrend() completed")
         return flux / noise_model, noise_model
 
 class SavGolDetrender(BaseDetrender):
