@@ -150,9 +150,6 @@ class DataInspector(QMainWindow):
         self.detrend_model_combo = QComboBox()
         self.detrend_model_combo.currentTextChanged.connect(self.on_detrend_model_change)
         layout.addWidget(self.detrend_model_combo)
-        
-        # Initialize with CPU options (will be updated when backend changes)
-        self.update_detrending_options()
 
         # --- Stacked widget for model parameters ---
         self.detrend_params_stack = QStackedWidget()
@@ -416,6 +413,10 @@ class DataInspector(QMainWindow):
 
         layout.addWidget(self.detrend_params_stack)
         detrend_group.setLayout(layout)
+        
+        # Initialize with CPU options (after all parameter widgets are created)
+        self.update_detrending_options()
+        
         return detrend_group
 
     def _create_analysis_group(self):
