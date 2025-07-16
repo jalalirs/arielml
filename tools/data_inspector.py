@@ -358,6 +358,18 @@ class DataInspector(QMainWindow):
     A PyQt GUI application to inspect Ariel dataset files and visualize
     the full data reduction pipeline.
     """
+    
+    # Pre-coded tab-pipeline associations
+    TAB_PIPELINE_MAPPING = {
+        "Detector View": ["all"],  # Always visible
+        "Photometry View": ["preprocessing", "cnn", "diffusion"],  # Pipelines that do photometry
+        "Detrended View": ["preprocessing"],  # Only preprocessing does detrending
+        "Phase-Folded View": ["preprocessing"],  # Only preprocessing does phase folding
+        "Bayesian Results": ["bayesian"],  # Only Bayesian pipeline
+        "Component Analysis": ["bayesian"],  # Only Bayesian has fitted components
+        "Performance Log": ["all"]  # Always visible
+    }
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ariel Data Inspector")
@@ -377,6 +389,12 @@ class DataInspector(QMainWindow):
         self.current_backend = None  # Track which backend the data is loaded on
         self.current_instrument = None  # Track which instrument the data is loaded for
         self.navigation_locked = False  # Track which panel is locked
+        
+        # Tab indices for dynamic visibility management
+        self.tab_indices = {}
+        
+        # Current planet tracking
+        self.current_planet_id = None
 
         # --- Main Layout ---
         central_widget = QWidget()
@@ -397,9 +415,9 @@ class DataInspector(QMainWindow):
         self._lock_settings_panel()
         
         # Set initial pipeline mode state to ensure correct tab visibility
-        # Since "Traditional Pipeline" is selected by default (index 0), 
+        # Since "Preprocessing Pipeline" is selected by default (index 0), 
         # we need to explicitly call the change handler to set the correct tab
-        self.on_pipeline_mode_change("Traditional Pipeline")
+        self.on_pipeline_mode_change("Preprocessing Pipeline")
 
     # --- UI Creation Methods (Broken down for clarity) ---
 
@@ -463,7 +481,7 @@ class DataInspector(QMainWindow):
         pipeline_mode_group = QGroupBox("Pipeline Mode")
         pipeline_mode_layout = QVBoxLayout()
         self.pipeline_mode_combo = QComboBox()
-        self.pipeline_mode_combo.addItems(["Traditional Pipeline", "Bayesian Pipeline"])
+        self.pipeline_mode_combo.addItems(["Preprocessing Pipeline", "Bayesian Pipeline"])
         self.pipeline_mode_combo.currentTextChanged.connect(self.on_pipeline_mode_change)
         pipeline_mode_layout.addWidget(self.pipeline_mode_combo)
         pipeline_mode_group.setLayout(pipeline_mode_layout)
@@ -742,10 +760,10 @@ class DataInspector(QMainWindow):
         batch_layout.addWidget(QLabel(""))
         bayesian_layout.addLayout(batch_layout)
         
-        # Add placeholder widget for traditional pipeline (no parameters needed)
+        # Add placeholder widget for preprocessing pipeline (no parameters needed)
         placeholder_widget = QWidget()
         placeholder_layout = QVBoxLayout(placeholder_widget)
-        placeholder_layout.addWidget(QLabel("No additional parameters needed for traditional pipeline."))
+        placeholder_layout.addWidget(QLabel("No additional parameters needed for preprocessing pipeline."))
         placeholder_layout.addStretch()
         
         # Map models to their parameter widgets
@@ -855,14 +873,18 @@ class DataInspector(QMainWindow):
         
         self.image_cbar = None
 
-        tabs.addTab(self._create_detector_tab(), "Detector View")
-        tabs.addTab(self.single_lc_canvas, "Photometry View")
-        tabs.addTab(self._create_detrended_tab(), "Detrended View")
-        tabs.addTab(self.phase_folded_canvas, "Phase-Folded View")
-        tabs.addTab(self._create_bayesian_tab(), "Bayesian Results")
-        tabs.addTab(self._create_components_tab(), "Component Analysis")
+        # Store tab indices for dynamic visibility management
+        self.tab_indices["Detector View"] = tabs.addTab(self._create_detector_tab(), "Detector View")
+        self.tab_indices["Photometry View"] = tabs.addTab(self.single_lc_canvas, "Photometry View")
+        self.tab_indices["Detrended View"] = tabs.addTab(self._create_detrended_tab(), "Detrended View")
+        self.tab_indices["Phase-Folded View"] = tabs.addTab(self.phase_folded_canvas, "Phase-Folded View")
+        self.tab_indices["Bayesian Results"] = tabs.addTab(self._create_bayesian_tab(), "Bayesian Results")
+        self.tab_indices["Component Analysis"] = tabs.addTab(self._create_components_tab(), "Component Analysis")
         self.log_display = QTextEdit(); self.log_display.setReadOnly(True)
-        tabs.addTab(self.log_display, "Performance Log")
+        self.tab_indices["Performance Log"] = tabs.addTab(self.log_display, "Performance Log")
+        
+        # Store reference to tab widget for visibility management
+        self.tab_widget = tabs
         
         main_layout.addWidget(tabs)
         container = QWidget(); container.setLayout(main_layout)
@@ -886,6 +908,18 @@ class DataInspector(QMainWindow):
         self.show_covariance_checkbox.setChecked(False)
         self.show_covariance_checkbox.toggled.connect(self.update_bayesian_plot)
         controls_layout.addWidget(self.show_covariance_checkbox)
+        
+        self.show_ground_truth_checkbox = QCheckBox("Show Ground Truth")
+        self.show_ground_truth_checkbox.setChecked(True)
+        self.show_ground_truth_checkbox.setEnabled(False)  # Will be enabled when data is loaded
+        self.show_ground_truth_checkbox.toggled.connect(self.update_bayesian_plot)
+        
+        # Add log scale option for better comparison
+        self.log_scale_checkbox = QCheckBox("Log Scale Y-Axis")
+        self.log_scale_checkbox.setChecked(False)
+        self.log_scale_checkbox.toggled.connect(self.update_bayesian_plot)
+        controls_layout.addWidget(self.log_scale_checkbox)
+        controls_layout.addWidget(self.show_ground_truth_checkbox)
         
         layout.addWidget(controls_group)
         layout.addWidget(self.bayesian_canvas)
@@ -956,13 +990,13 @@ class DataInspector(QMainWindow):
         # Determine which pipeline to run based on mode
         mode = self.pipeline_mode_combo.currentText()
         
-        if mode == "Traditional Pipeline":
-            self.run_traditional_pipeline()
+        if mode == "Preprocessing Pipeline":
+            self.run_preprocessing_pipeline()
         else:  # Bayesian Pipeline
             self.run_bayesian_pipeline()
     
-    def run_traditional_pipeline(self):
-        """Run the traditional pipeline with detrending."""
+    def run_preprocessing_pipeline(self):
+        """Run the preprocessing pipeline with detrending."""
         # Get detrender
         detrender = self._get_detrender(self.detrend_model_combo.currentText())
         if detrender is None:
@@ -1562,6 +1596,12 @@ class DataInspector(QMainWindow):
             self.current_backend = self.backend_combo.currentText()
             self.current_instrument = self.instrument_combo.currentText()
             
+            # Update ground truth checkbox state based on observation
+            ground_truth_available = self.observation.has_ground_truth()
+            if hasattr(self, 'show_ground_truth_checkbox'):
+                self.show_ground_truth_checkbox.setEnabled(ground_truth_available)
+                self.show_ground_truth_checkbox.setChecked(ground_truth_available)
+            
             # Update star info display
             if self.star_info_df is not None and int(self.planet_combo.currentText()) in self.star_info_df.index:
                 self.info_display.setText(self.star_info_df.loc[int(self.planet_combo.currentText())].to_string())
@@ -1593,7 +1633,8 @@ class DataInspector(QMainWindow):
             self.navigation_locked = True
             
             # Update current data label
-            self.current_data_label.setText(f"Current Data: Instrument = {self.current_instrument} | Backend = {self.current_backend}")
+            ground_truth_status = " | Ground Truth: Available" if ground_truth_available else " | Ground Truth: Not Available"
+            self.current_data_label.setText(f"Current Data: Instrument = {self.current_instrument} | Backend = {self.current_backend}{ground_truth_status}")
 
             # Don't run pipeline automatically - wait for user to click "Apply"
             # Just update the raw plots
@@ -1745,7 +1786,11 @@ class DataInspector(QMainWindow):
     def on_pipeline_mode_change(self, mode: str):
         """Handle pipeline mode changes."""
         print(f"DEBUG: Pipeline mode changed to: {mode}")
-        if mode == "Traditional Pipeline":
+        
+        # Update tab visibility based on selected pipeline
+        self.update_tab_visibility(mode)
+        
+        if mode == "Preprocessing Pipeline":
             # Show detrending tab, hide Bayesian tab
             self.settings_tabs.setTabVisible(self.detrending_tab_index, True)
             self.settings_tabs.setTabVisible(self.bayesian_tab_index, False)
@@ -1753,9 +1798,18 @@ class DataInspector(QMainWindow):
             self.pipeline_button.setEnabled(self.observation is not None and self.observation.is_loaded)
             print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
             
-            # Update traditional plots to ensure they're visible
+            # Update preprocessing plots to ensure they're visible
             if self.observation and self.observation.is_loaded:
                 self._update_all_plots()
+                
+                # Show ground truth info in status bar if available
+                if self.observation.has_ground_truth():
+                    ground_truth = self.observation.get_ground_truth()
+                    self.statusBar().showMessage(
+                        f"Ground Truth Available: {len(ground_truth)} wavelengths, "
+                        f"depth range: {ground_truth.min():.4f} - {ground_truth.max():.4f}", 
+                        5000
+                    )
         else:  # Bayesian Pipeline
             # Hide detrending tab, show Bayesian tab
             self.settings_tabs.setTabVisible(self.detrending_tab_index, False)
@@ -1763,6 +1817,10 @@ class DataInspector(QMainWindow):
             self.pipeline_button.setText("Run Bayesian Pipeline")
             self.pipeline_button.setEnabled(self.observation is not None and self.observation.is_loaded)
             print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
+            
+            # Show ground truth data immediately when Bayesian pipeline is selected
+            if self.observation and self.observation.is_loaded:
+                self.show_ground_truth_preview()
             
             # Update Bayesian plots if results are available
             if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
@@ -1938,7 +1996,8 @@ class DataInspector(QMainWindow):
         # Clear current data tracking
         self.current_backend = None
         self.current_instrument = None
-        self.current_data_label.setText("Current Data: Instrument = None | Backend = None")
+        self.current_planet_id = None
+        self.current_data_label.setText("Current Data: Instrument = None | Backend = None | Ground Truth: Not Available")
         
         # Clear observation and Bayesian results
         self.observation = None
@@ -1975,6 +2034,8 @@ class DataInspector(QMainWindow):
         self.mask_method_combo.setEnabled(False)
         self.bins_spinbox.setEnabled(False)
         self.pipeline_button.setEnabled(False)
+        # Disable pipeline mode selection
+        self.pipeline_mode_combo.setEnabled(False)
     
     def _unlock_settings_panel(self):
         """Unlock the settings panel (enable all controls)."""
@@ -1986,16 +2047,153 @@ class DataInspector(QMainWindow):
         self.mask_method_combo.setEnabled(True)
         self.bins_spinbox.setEnabled(True)
         self.pipeline_button.setEnabled(True)
+        # Enable pipeline mode selection
+        self.pipeline_mode_combo.setEnabled(True)
+    
+    def update_tab_visibility(self, selected_pipeline):
+        """Show/hide tabs based on selected pipeline BEFORE execution."""
+        # Convert pipeline name to mapping key
+        pipeline_key = self._get_pipeline_key(selected_pipeline)
+        
+        for tab_name, supported_pipelines in self.TAB_PIPELINE_MAPPING.items():
+            if tab_name in self.tab_indices:
+                tab_index = self.tab_indices[tab_name]
+                
+                if "all" in supported_pipelines or pipeline_key in supported_pipelines:
+                    self.tab_widget.setTabVisible(tab_index, True)
+                else:
+                    self.tab_widget.setTabVisible(tab_index, False)
+    
+    def _get_pipeline_key(self, pipeline_name):
+        """Convert pipeline display name to mapping key."""
+        if "Preprocessing" in pipeline_name:
+            return "preprocessing"
+        elif "Bayesian" in pipeline_name:
+            return "bayesian"
+        elif "CNN" in pipeline_name:
+            return "cnn"
+        elif "Diffusion" in pipeline_name:
+            return "diffusion"
+        else:
+            return "unknown"
+    
+    def show_ground_truth_preview(self):
+        """
+        Show ground truth data immediately when a pipeline is selected.
+        This provides immediate feedback about what the user is working with.
+        """
+        if not self.observation or not self.observation.has_ground_truth():
+            return
+            
+        # Clear the Bayesian plot and show ground truth preview
+        self.bayesian_ax.clear()
+        
+        ground_truth = self.observation.get_ground_truth()
+        
+        # Use actual wavelengths if available, otherwise use indices
+        if self.observation.has_wavelengths():
+            wavelengths = self.observation.get_wavelengths()
+            # Ensure we have the same number of wavelengths as ground truth
+            if len(wavelengths) >= len(ground_truth):
+                wavelengths = wavelengths[:len(ground_truth)]
+            else:
+                # Fallback to indices if wavelength count doesn't match
+                wavelengths = np.arange(len(ground_truth))
+        else:
+            wavelengths = np.arange(len(ground_truth))
+        
+        # Plot ground truth with better visibility
+        self.bayesian_ax.plot(wavelengths, ground_truth, 'r-', linewidth=3, alpha=0.9, label='Ground Truth')
+        
+        # Add information about the data
+        info_text = f"Ground Truth Preview\n"
+        info_text += f"Planet ID: {self.observation.planet_id}\n"
+        info_text += f"Number of wavelengths: {len(ground_truth)}\n"
+        info_text += f"Transit depth range: {ground_truth.min():.4f}-{ground_truth.max():.4f}\n"
+        
+        # Add wavelength info if available
+        if self.observation.has_wavelengths():
+            info_text += f"Wavelength range: {wavelengths.min():.2f}-{wavelengths.max():.2f} μm"
+        else:
+            info_text += f"Wavelength indices: 0-{len(ground_truth)-1}"
+        
+        # Add info text to plot
+        self.bayesian_ax.text(0.02, 0.98, info_text, transform=self.bayesian_ax.transAxes, 
+                            verticalalignment='top', fontsize=10, 
+                            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+        
+        # Format the plot
+        self.bayesian_ax.set_title("Ground Truth Preview")
+        if self.observation.has_wavelengths():
+            self.bayesian_ax.set_xlabel("Wavelength (μm)")
+        else:
+            self.bayesian_ax.set_xlabel("Wavelength Index")
+        self.bayesian_ax.set_ylabel("Transit Depth")
+        self.bayesian_ax.legend()
+        self.bayesian_ax.grid(True, alpha=0.3)
+        
+        self.bayesian_canvas.draw()
+    
+    def calculate_ground_truth_metrics(self, predictions, ground_truth=None):
+        """Calculate metrics between predictions and ground truth."""
+        if ground_truth is None:
+            # Legacy mode: extract ground truth from observation
+            if not self.observation or not self.observation.has_ground_truth():
+                return None
+            ground_truth = self.observation.get_ground_truth()
+        
+        # Ensure both arrays have the same length
+        min_length = min(len(predictions), len(ground_truth))
+        predictions = predictions[:min_length]
+        ground_truth = ground_truth[:min_length]
+        
+        # Remove any NaN values
+        valid_mask = np.isfinite(predictions) & np.isfinite(ground_truth)
+        if not np.any(valid_mask):
+            return None
+            
+        predictions_clean = predictions[valid_mask]
+        ground_truth_clean = ground_truth[valid_mask]
+        
+        if len(predictions_clean) == 0:
+            return None
+        
+        # Calculate metrics
+        rms_error = np.sqrt(np.mean((predictions_clean - ground_truth_clean) ** 2))
+        mae = np.mean(np.abs(predictions_clean - ground_truth_clean))
+        
+        # Calculate correlation coefficient (R²)
+        correlation = np.corrcoef(predictions_clean, ground_truth_clean)[0, 1]
+        if np.isnan(correlation):
+            correlation = 0.0
+        
+        return {
+            'rms_error': rms_error,
+            'mae': mae,
+            'correlation': correlation,
+            'ground_truth': ground_truth_clean,
+            'predictions': predictions_clean
+        }
 
     def update_bayesian_plot(self):
         """Update the Bayesian results plot."""
         if not hasattr(self, 'bayesian_results') or self.bayesian_results is None:
-            # Clear the plot if no results
-            self.bayesian_ax.clear()
-            self.bayesian_ax.set_title("No Bayesian Results Available")
-            self.bayesian_ax.set_xlabel("Wavelength Index")
-            self.bayesian_ax.set_ylabel("Transit Depth")
-            self.bayesian_canvas.draw()
+            # Show ground truth preview if available, otherwise show "no results" message
+            if self.observation and self.observation.has_ground_truth():
+                self.show_ground_truth_preview()
+            else:
+                # Clear the plot if no results and no ground truth
+                self.bayesian_ax.clear()
+                self.bayesian_ax.set_title("No Bayesian Results Available")
+                
+                # Use appropriate x-axis label based on whether we have wavelength data
+                if self.observation and self.observation.has_wavelengths():
+                    self.bayesian_ax.set_xlabel("Wavelength (μm)")
+                else:
+                    self.bayesian_ax.set_xlabel("Wavelength Index")
+                    
+                self.bayesian_ax.set_ylabel("Transit Depth")
+                self.bayesian_canvas.draw()
             return
         
         # Clear the plot
@@ -2006,11 +2204,26 @@ class DataInspector(QMainWindow):
         uncertainties = self.bayesian_results['uncertainties']
         covariance = self.bayesian_results['covariance']
         
-        # Create wavelength indices
-        wavelengths = np.arange(len(predictions))
+        # Create wavelength array - use actual wavelengths if available
+        if self.observation and self.observation.has_wavelengths():
+            wavelengths = self.observation.get_wavelengths()
+            print(f"DEBUG: Available wavelengths: {len(wavelengths)} points, range: {wavelengths.min():.2f}-{wavelengths.max():.2f} μm")
+            print(f"DEBUG: Predictions: {len(predictions)} points")
+            
+            # Ensure we have the same number of wavelengths as predictions
+            if len(wavelengths) >= len(predictions):
+                wavelengths = wavelengths[:len(predictions)]
+                print(f"DEBUG: Using wavelengths[:{len(predictions)}] = {wavelengths.min():.2f}-{wavelengths.max():.2f} μm")
+            else:
+                # Fallback to indices if wavelength count doesn't match
+                wavelengths = np.arange(len(predictions))
+                print(f"DEBUG: Fallback to indices: 0-{len(predictions)-1}")
+        else:
+            wavelengths = np.arange(len(predictions))
+            print(f"DEBUG: No wavelength data, using indices: 0-{len(predictions)-1}")
         
-        # Plot transit depths
-        self.bayesian_ax.plot(wavelengths, predictions, 'b-', linewidth=2, label='Transit Depth')
+        # Plot transit depths with transparency for better visibility
+        self.bayesian_ax.plot(wavelengths, predictions, 'b-', linewidth=2, alpha=0.8, label='Transit Depth')
         
         # Show uncertainties if requested
         if self.show_uncertainties_checkbox.isChecked():
@@ -2018,6 +2231,37 @@ class DataInspector(QMainWindow):
                                         predictions - uncertainties, 
                                         predictions + uncertainties, 
                                         alpha=0.3, color='blue', label='±1σ Uncertainty')
+        
+        # Show ground truth if available and requested
+        if self.observation and self.observation.has_ground_truth() and self.show_ground_truth_checkbox.isChecked():
+            ground_truth = self.observation.get_ground_truth()
+            print(f"DEBUG: Ground truth: {len(ground_truth)} points, range: {ground_truth.min():.4f}-{ground_truth.max():.4f}")
+            
+            # Use the SAME wavelength array as the predictions for proper alignment
+            # This ensures both curves are plotted on the same x-axis scale
+            if len(wavelengths) >= len(ground_truth):
+                gt_wavelengths = wavelengths[:len(ground_truth)]
+            else:
+                # If predictions have fewer points than ground truth, truncate ground truth
+                ground_truth = ground_truth[:len(wavelengths)]
+                gt_wavelengths = wavelengths
+            
+            print(f"DEBUG: Ground truth wavelengths: {len(gt_wavelengths)} points, range: {gt_wavelengths.min():.2f}-{gt_wavelengths.max():.2f} μm")
+                
+            self.bayesian_ax.plot(gt_wavelengths, ground_truth, 'r--', linewidth=3, alpha=0.9, label='Ground Truth')
+            
+            # Calculate and display metrics
+            metrics = self.calculate_ground_truth_metrics(predictions[:len(ground_truth)], ground_truth)
+            
+            # Add metrics text to plot
+            metrics_text = f"Metrics:\n"
+            metrics_text += f"RMSE: {metrics['rms_error']:.4f}\n"
+            metrics_text += f"MAE: {metrics['mae']:.4f}\n"
+            metrics_text += f"R²: {metrics['correlation']:.4f}"
+            
+            self.bayesian_ax.text(0.02, 0.02, metrics_text, transform=self.bayesian_ax.transAxes, 
+                                verticalalignment='bottom', fontsize=9, 
+                                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
         
         # Show covariance matrix if requested
         if self.show_covariance_checkbox.isChecked():
@@ -2037,9 +2281,24 @@ class DataInspector(QMainWindow):
                 print(f"Warning: Could not display covariance matrix: {e}")
                 # Continue without showing the covariance matrix
         
+        # Apply log scale if requested
+        if hasattr(self, 'log_scale_checkbox') and self.log_scale_checkbox.isChecked():
+            self.bayesian_ax.set_yscale('log')
+            # Set reasonable log scale limits
+            all_values = np.concatenate([predictions, ground_truth if self.observation and self.observation.has_ground_truth() else []])
+            min_val = np.min(all_values[all_values > 0])  # Avoid log(0)
+            max_val = np.max(all_values)
+            self.bayesian_ax.set_ylim(min_val * 0.5, max_val * 2)
+        
         # Format the plot
         self.bayesian_ax.set_title("Bayesian Pipeline Results")
-        self.bayesian_ax.set_xlabel("Wavelength Index")
+        
+        # Use appropriate x-axis label based on whether we have wavelength data
+        if self.observation and self.observation.has_wavelengths():
+            self.bayesian_ax.set_xlabel("Wavelength (μm)")
+        else:
+            self.bayesian_ax.set_xlabel("Wavelength Index")
+            
         self.bayesian_ax.set_ylabel("Transit Depth")
         self.bayesian_ax.legend()
         self.bayesian_ax.grid(True, alpha=0.3)

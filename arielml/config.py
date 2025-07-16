@@ -17,6 +17,13 @@ INSTRUMENT_SHAPES = {
     "FGS1": (135000, 32, 32),
 }
 
+# --- Wavelength Ranges ---
+# Column ranges for wavelength extraction (inclusive)
+WAVELENGTH_RANGES = {
+    "AIRS-CH0": (39, 321),  # Columns 39-321 (283 wavelengths total)
+    "FGS1": (0, 0),  # Single wavelength
+}
+
 # --- Calibration Defaults ---
 CALIBRATION_OPTIONS = {
     "apply_adc": True,
@@ -32,10 +39,10 @@ CALIBRATION_OPTIONS = {
 # Coordinates are inclusive pixel indices [start, end].
 PHOTOMETRY_APERTURES = {
     "AIRS-CH0": {
-        "signal": {"y_start": 10, "y_end": 22, "x_start": 0, "x_end": 355},
+        "signal": {"y_start": 10, "y_end": 22, "x_start": 39, "x_end": 321},  # Use correct wavelength range
         "background": [
-            {"y_start": 2, "y_end": 8, "x_start": 0, "x_end": 355},
-            {"y_start": 24, "y_end": 30, "x_start": 0, "x_end": 355},
+            {"y_start": 2, "y_end": 8, "x_start": 39, "x_end": 321},
+            {"y_start": 24, "y_end": 30, "x_start": 39, "x_end": 321},
         ]
     },
     "FGS1": {

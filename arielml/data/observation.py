@@ -26,6 +26,8 @@ class DataObservation:
         self.phase_folded_lc = None
         self.mask = None
         self.star_info = None
+        self.ground_truth = None  # Ground truth transit depths
+        self.wavelengths = None  # Wavelength values for spectral channels
         self.is_loaded = False
         self.backend_name = 'cpu'
         self.xp = np
@@ -50,12 +52,22 @@ class DataObservation:
         calib_data_np = loaders.load_calibration_files(self.planet_id, self.instrument, self.obs_id, self.split)
         all_star_info = loaders.load_star_info(self.split)
         
+        # Load ground truth if available (training set only)
+        ground_truth_np = loaders.load_ground_truth(self.planet_id, self.split)
+        
+        # Load wavelength information
+        wavelengths_np = loaders.load_wavelengths()
+        
         if all_star_info is not None and int(self.planet_id) in all_star_info.index:
             self.star_info = all_star_info.loc[int(self.planet_id)]
             
         self.raw_signal = self.xp.asarray(raw_signal_np)
         for key, value in calib_data_np.items():
             self.calib_data[key] = self.xp.asarray(value)
+            
+        # Store ground truth and wavelengths (keep as numpy arrays for consistency)
+        self.ground_truth = ground_truth_np
+        self.wavelengths = wavelengths_np
             
         self.processed_signal = self.xp.copy(self.raw_signal)
         self.is_loaded = True
@@ -218,3 +230,39 @@ class DataObservation:
         
     def get_phase_folded_lc(self):
         return self.phase_folded_lc
+    
+    def get_ground_truth(self) -> np.ndarray:
+        """
+        Gets the ground truth transit depths if available.
+        
+        Returns:
+            Ground truth transit depths as numpy array, or None if not available
+        """
+        return self.ground_truth
+    
+    def has_ground_truth(self) -> bool:
+        """
+        Checks if ground truth data is available for this observation.
+        
+        Returns:
+            True if ground truth is available, False otherwise
+        """
+        return self.ground_truth is not None
+    
+    def get_wavelengths(self) -> np.ndarray:
+        """
+        Gets the wavelength values for the spectral channels.
+        
+        Returns:
+            Wavelength values in microns as numpy array, or None if not available
+        """
+        return self.wavelengths
+    
+    def has_wavelengths(self) -> bool:
+        """
+        Checks if wavelength data is available for this observation.
+        
+        Returns:
+            True if wavelengths are available, False otherwise
+        """
+        return self.wavelengths is not None
