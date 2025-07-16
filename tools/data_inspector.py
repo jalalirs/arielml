@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QTabWidget, QStackedWidget, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QIcon
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,9 +22,21 @@ from matplotlib.patches import Rectangle
 # Import all necessary components from our library
 from arielml.data.observation import DataObservation
 from arielml.data import loaders, detrending
+from arielml.pipelines.bayesian_pipeline import BayesianPipeline
 from arielml.config import DATASET_DIR, PHOTOMETRY_APERTURES
 from arielml.backend import GPU_ENABLED, GP_GPU_ENABLED
 from arielml.utils.signals import DetrendingProgress
+
+def force_gpu_cleanup():
+    """Force cleanup of GPU memory to prevent OOM errors."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print("DEBUG: Forced GPU cleanup")
+    except ImportError:
+        pass
 
 # Check if sklearn GP is available
 try:
@@ -85,6 +98,142 @@ class DataLoadingWorker(QThread):
         self._should_stop = True
 
 
+class BayesianPipelineWorker(QThread):
+    """Worker thread for running the Bayesian pipeline asynchronously."""
+    
+    progress_signal = pyqtSignal(str)  # Simple string messages for pipeline steps
+    finished_signal = pyqtSignal(object)  # Emit the pipeline results
+    error_signal = pyqtSignal(str)
+    
+    def __init__(self, observation, pipeline_params):
+        super().__init__()
+        self.observation = observation
+        self.pipeline_params = pipeline_params
+        self._should_stop = False
+    
+    def run(self):
+        """Run the Bayesian pipeline in a separate thread."""
+        try:
+            print("DEBUG: Starting Bayesian pipeline in worker thread")
+            
+            # Force GPU cleanup before starting
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print("DEBUG: Forced GPU cleanup before starting Bayesian pipeline")
+            except ImportError:
+                pass
+            
+            # Create Bayesian pipeline
+            self.progress_signal.emit("Creating Bayesian pipeline...")
+            self.check_stop()
+            
+            pipeline = BayesianPipeline(**self.pipeline_params)
+            
+            # Set up progress callback
+            pipeline.set_progress_callback(self.progress_signal.emit)
+            
+            # Ensure photometry has been run (needed for light curves)
+            if self.observation.light_curves is None:
+                self.progress_signal.emit("Running photometry for Bayesian pipeline...")
+                self.check_stop()
+                self.observation.run_photometry()
+            
+            # Get data from observation using correct methods
+            time = self.observation.get_time_array()
+            flux = self.observation.get_light_curves(return_type='numpy')
+            transit_mask = self.observation.get_transit_mask(method='empirical')
+            
+            # Convert to numpy if needed
+            if hasattr(time, 'get'):
+                time = time.get()
+            if hasattr(transit_mask, 'get'):
+                transit_mask = transit_mask.get()
+            
+            # Fit the pipeline
+            self.progress_signal.emit("Fitting Bayesian pipeline...")
+            self.check_stop()
+            pipeline.fit(time, flux, transit_mask)
+            
+            # Make predictions
+            self.progress_signal.emit("Making predictions with MCMC...")
+            self.check_stop()
+            
+            # Add batch size for memory management
+            predictions, uncertainties, covariance = pipeline.predict_with_uncertainties(
+                time, flux, transit_mask, batch_size=self.pipeline_params.get('batch_size', 20)
+            )
+            
+            # Store results (but don't store the pipeline object to avoid state persistence)
+            results = {
+                'predictions': predictions,
+                'uncertainties': uncertainties,
+                'covariance': covariance,
+                'time': time,
+                'flux': flux,
+                'transit_mask': transit_mask,
+                'pipeline_params': self.pipeline_params,  # Store params instead of pipeline object
+                # Store fitted components for Component Analysis tab
+                'fitted_components': pipeline.fitted_components.copy(),
+                'mcmc_samples': pipeline.get_mcmc_samples(),
+                'backend_info': pipeline.get_backend_info()
+            }
+            
+            # Clean up pipeline object to prevent state persistence
+            del pipeline
+            
+            # Force GPU cleanup after pipeline completion
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print("DEBUG: Forced GPU cleanup after Bayesian pipeline completion")
+            except ImportError:
+                pass
+            
+            # Final check before emitting success
+            self.check_stop()
+            
+            print("DEBUG: Bayesian pipeline completed successfully")
+            self.finished_signal.emit(results)
+            
+        except InterruptedError:
+            print("DEBUG: Bayesian pipeline interrupted by user")
+            # Operation was stopped by user - don't emit error
+            pass
+        except Exception as e:
+            print(f"DEBUG: Bayesian pipeline error: {e}")
+            self.error_signal.emit(str(e))
+        finally:
+            # Ensure GPU cleanup even if there's an error
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print("DEBUG: Forced GPU cleanup in Bayesian pipeline finally block")
+            except ImportError:
+                pass
+    
+    def check_stop(self):
+        """Check if a stop has been requested."""
+        if self._should_stop:
+            raise InterruptedError("Bayesian pipeline stopped by user")
+    
+    def stop(self):
+        """Request the worker to stop."""
+        self._should_stop = True
+        
+        # Clean up GPU memory immediately when stopping
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("DEBUG: Cleared GPU cache when stopping Bayesian pipeline worker")
+        except ImportError:
+            pass
+
+
 class PipelineWorker(QThread):
     """Worker thread for running the pipeline asynchronously."""
     
@@ -137,6 +286,17 @@ class PipelineWorker(QThread):
                 # Clean up observer
                 if hasattr(self.detrender, 'remove_observer') and hasattr(self.detrender, '_observers'):
                     self.detrender.remove_observer(self._on_detrending_progress)
+                
+                # Clean up GPU memory after detrending
+                detrender_class = self.detrender.__class__.__name__
+                if 'GPyTorch' in detrender_class or 'GPU' in detrender_class:
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            print("DEBUG: Cleared GPU cache after detrending in worker")
+                    except ImportError:
+                        pass
             else:
                 print("DEBUG: No detrender provided, skipping detrending")
             
@@ -179,6 +339,18 @@ class PipelineWorker(QThread):
         self._should_stop = True
         if hasattr(self.detrender, 'request_stop'):
             self.detrender.request_stop()
+        
+        # Clean up GPU memory immediately when stopping
+        if hasattr(self, 'detrender') and self.detrender:
+            detrender_class = self.detrender.__class__.__name__
+            if 'GPyTorch' in detrender_class or 'GPU' in detrender_class:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        print("DEBUG: Cleared GPU cache when stopping pipeline worker")
+                except ImportError:
+                    pass
 
 
 class DataInspector(QMainWindow):
@@ -190,11 +362,21 @@ class DataInspector(QMainWindow):
         super().__init__()
         self.setWindowTitle("Ariel Data Inspector")
         self.setGeometry(100, 100, 1600, 900)
+        
+        # Set application icon
+        icon_path = Path(__file__).parent.parent / "arielml" / "assets" / "ESA_Ariel_official_mission_patch.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        else:
+            print(f"Warning: Icon not found at {icon_path}")
 
         self.observation = None
         self.star_info_df = None
         self.worker = None
         self.loading_worker = None
+        self.current_backend = None  # Track which backend the data is loaded on
+        self.current_instrument = None  # Track which instrument the data is loaded for
+        self.navigation_locked = False  # Track which panel is locked
 
         # --- Main Layout ---
         central_widget = QWidget()
@@ -209,33 +391,100 @@ class DataInspector(QMainWindow):
         
         self.setStatusBar(QStatusBar())
         self.populate_planet_ids()
+        
+        # Set initial state: navigation unlocked, settings locked
+        self._unlock_navigation_panel()
+        self._lock_settings_panel()
+        
+        # Set initial pipeline mode state to ensure correct tab visibility
+        # Since "Traditional Pipeline" is selected by default (index 0), 
+        # we need to explicitly call the change handler to set the correct tab
+        self.on_pipeline_mode_change("Traditional Pipeline")
 
     # --- UI Creation Methods (Broken down for clarity) ---
+
+    def _create_bayesian_settings_group(self):
+        bayesian_group = QGroupBox("Bayesian Pipeline Parameters")
+        layout = QVBoxLayout()
+        # PCA components
+        pca_layout = QHBoxLayout()
+        pca_layout.addWidget(QLabel("PCA Components:"))
+        self.bayesian_pca_spinbox = QSpinBox()
+        self.bayesian_pca_spinbox.setRange(0, 5)
+        self.bayesian_pca_spinbox.setValue(1)
+        pca_layout.addWidget(self.bayesian_pca_spinbox)
+        layout.addLayout(pca_layout)
+        # Iterations
+        iter_layout = QHBoxLayout()
+        iter_layout.addWidget(QLabel("Iterations:"))
+        self.bayesian_iter_spinbox = QSpinBox()
+        self.bayesian_iter_spinbox.setRange(1, 20)
+        self.bayesian_iter_spinbox.setValue(7)
+        iter_layout.addWidget(self.bayesian_iter_spinbox)
+        layout.addLayout(iter_layout)
+        # Samples
+        samples_layout = QHBoxLayout()
+        samples_layout.addWidget(QLabel("Samples:"))
+        self.bayesian_samples_spinbox = QSpinBox()
+        self.bayesian_samples_spinbox.setRange(10, 1000)
+        self.bayesian_samples_spinbox.setValue(100)
+        samples_layout.addWidget(self.bayesian_samples_spinbox)
+        layout.addLayout(samples_layout)
+        # Batch size for MCMC
+        batch_layout = QHBoxLayout()
+        batch_layout.addWidget(QLabel("MCMC Batch Size:"))
+        self.bayesian_batch_spinbox = QSpinBox()
+        self.bayesian_batch_spinbox.setRange(5, 50)
+        self.bayesian_batch_spinbox.setValue(20)
+        self.bayesian_batch_spinbox.setToolTip("Number of MCMC samples to process at once. Higher values are faster but use more GPU memory.")
+        batch_layout.addWidget(self.bayesian_batch_spinbox)
+        layout.addLayout(batch_layout)
+        # Drift batch size
+        drift_batch_layout = QHBoxLayout()
+        drift_batch_layout.addWidget(QLabel("Drift Batch Size:"))
+        self.drift_batch_spinbox = QSpinBox()
+        self.drift_batch_spinbox.setRange(1, 64)
+        self.drift_batch_spinbox.setValue(8)
+        self.drift_batch_spinbox.setToolTip("Number of wavelengths to process at once in the drift step. Higher values are faster but use more GPU memory.")
+        drift_batch_layout.addWidget(self.drift_batch_spinbox)
+        layout.addLayout(drift_batch_layout)
+        bayesian_group.setLayout(layout)
+        return bayesian_group
 
     def _create_controls_panel(self):
         """Creates the right-hand panel with all user controls."""
         main_layout = QVBoxLayout()
-        
         # Static Navigation Group
         main_layout.addWidget(self._create_navigation_group())
-
+        # Add current data label
+        self.current_data_label = QLabel("Current Data: Instrument = None | Backend = None")
+        main_layout.addWidget(self.current_data_label)
+        # --- Pipeline Mode Selection ---
+        pipeline_mode_group = QGroupBox("Pipeline Mode")
+        pipeline_mode_layout = QVBoxLayout()
+        self.pipeline_mode_combo = QComboBox()
+        self.pipeline_mode_combo.addItems(["Traditional Pipeline", "Bayesian Pipeline"])
+        self.pipeline_mode_combo.currentTextChanged.connect(self.on_pipeline_mode_change)
+        pipeline_mode_layout.addWidget(self.pipeline_mode_combo)
+        pipeline_mode_group.setLayout(pipeline_mode_layout)
+        main_layout.addWidget(pipeline_mode_group)
         # --- Tabbed Interface for Settings ---
-        settings_tabs = QTabWidget()
-        settings_tabs.addTab(self._create_calibration_group(), "Calibration")
-        settings_tabs.addTab(self._create_detrending_group(), "Detrending")
-        settings_tabs.addTab(self._create_analysis_group(), "Analysis")
-        
-        main_layout.addWidget(settings_tabs)
-        
-        self.apply_button = QPushButton("Apply Changes & Rerun Pipeline")
-        self.apply_button.clicked.connect(self.run_pipeline_and_update_plots)
-        main_layout.addWidget(self.apply_button)
-        
+        self.settings_tabs = QTabWidget()
+        self.settings_tabs.addTab(self._create_calibration_group(), "Calibration")
+        self.detrending_group = self._create_detrending_group()
+        self.detrending_tab_index = self.settings_tabs.addTab(self.detrending_group, "Detrending")
+        self.settings_tabs.addTab(self._create_analysis_group(), "Analysis")
+        self.bayesian_settings_group = self._create_bayesian_settings_group()
+        self.bayesian_tab_index = self.settings_tabs.addTab(self.bayesian_settings_group, "Bayesian Pipeline")
+        main_layout.addWidget(self.settings_tabs)
+        # --- Pipeline Execution Button ---
+        self.pipeline_button = QPushButton("Apply Changes & Rerun Pipeline")
+        self.pipeline_button.clicked.connect(self.run_pipeline)
+        self.pipeline_button.setEnabled(False)  # Disabled until data is loaded
+        main_layout.addWidget(self.pipeline_button)
         # Progress tracking
         main_layout.addWidget(self._create_progress_group())
-        
         main_layout.addStretch()
-        
         container = QWidget()
         container.setLayout(main_layout)
         return container
@@ -257,13 +506,13 @@ class DataInspector(QMainWindow):
         self.instrument_combo = QComboBox()
         self.instrument_combo.addItems(["AIRS-CH0", "FGS1"])
         self.instrument_combo.currentTextChanged.connect(self.populate_obs_ids)
-        self.instrument_combo.currentTextChanged.connect(self.update_detrending_options)
-
+        # Remove: self.instrument_combo.currentTextChanged.connect(self.update_detrending_options)
+        
         self.backend_combo = QComboBox()
         self.backend_combo.addItems(["cpu", "gpu"])
         if not GPU_ENABLED:
             self.backend_combo.model().item(1).setEnabled(False)
-        self.backend_combo.currentTextChanged.connect(self.update_detrending_options)
+        # Remove: self.backend_combo.currentTextChanged.connect(self.update_detrending_options)
 
         self.load_button = QPushButton("Load Planet Data")
         self.load_button.clicked.connect(self.load_data)
@@ -479,11 +728,35 @@ class DataInspector(QMainWindow):
         self.bayesian_samples_spinbox.setRange(10, 1000)
         self.bayesian_samples_spinbox.setValue(100)
         samples_layout.addWidget(self.bayesian_samples_spinbox)
+        samples_layout.addWidget(QLabel(""))
         bayesian_layout.addLayout(samples_layout)
         
-        self.model_widget_map["Bayesian Multi-Component (CPU)"] = self.detrend_params_stack.addWidget(bayesian_widget)
+        # Batch size for MCMC
+        batch_layout = QHBoxLayout()
+        batch_layout.addWidget(QLabel("MCMC Batch Size:"))
+        self.bayesian_batch_spinbox = QSpinBox()
+        self.bayesian_batch_spinbox.setRange(5, 50)
+        self.bayesian_batch_spinbox.setValue(20)
+        self.bayesian_batch_spinbox.setToolTip("Number of MCMC samples to process at once. Higher values are faster but use more GPU memory.")
+        batch_layout.addWidget(self.bayesian_batch_spinbox)
+        batch_layout.addWidget(QLabel(""))
+        bayesian_layout.addLayout(batch_layout)
+        
+        # Add placeholder widget for traditional pipeline (no parameters needed)
+        placeholder_widget = QWidget()
+        placeholder_layout = QVBoxLayout(placeholder_widget)
+        placeholder_layout.addWidget(QLabel("No additional parameters needed for traditional pipeline."))
+        placeholder_layout.addStretch()
+        
+        # Map models to their parameter widgets
+        self.model_widget_map["AIRS Drift (CPU)"] = self.detrend_params_stack.addWidget(airs_widget)
+        self.model_widget_map["FGS Drift (CPU)"] = self.detrend_params_stack.addWidget(fgs_widget)
+        self.model_widget_map["Bayesian Multi-Component (CPU)"] = self.detrend_params_stack.addWidget(placeholder_widget)
+        
         if GP_GPU_ENABLED:
-            self.model_widget_map["Bayesian Multi-Component (GPU)"] = self.detrend_params_stack.indexOf(bayesian_widget)
+            self.model_widget_map["AIRS Drift (GPU)"] = self.detrend_params_stack.indexOf(airs_widget)
+            self.model_widget_map["FGS Drift (GPU)"] = self.detrend_params_stack.indexOf(fgs_widget)
+            self.model_widget_map["Bayesian Multi-Component (GPU)"] = self.detrend_params_stack.indexOf(placeholder_widget)
 
         layout.addWidget(self.detrend_params_stack)
         detrend_group.setLayout(layout)
@@ -565,22 +838,98 @@ class DataInspector(QMainWindow):
         self.single_lc_canvas = FigureCanvas(Figure(figsize=(10, 3), tight_layout=True))
         self.detrended_lc_canvas = FigureCanvas(Figure(figsize=(10, 3), tight_layout=True))
         self.phase_folded_canvas = FigureCanvas(Figure(figsize=(10, 3), tight_layout=True))
+        
+        # Bayesian visualization canvases
+        self.bayesian_canvas = FigureCanvas(Figure(figsize=(10, 6), tight_layout=True))
+        self.components_canvas = FigureCanvas(Figure(figsize=(12, 8), tight_layout=True))
+        
         self.image_ax = self.image_canvas.figure.subplots()
         self.single_lc_ax = self.single_lc_canvas.figure.subplots()
         self.detrended_lc_ax = self.detrended_lc_canvas.figure.subplots()
         self.phase_folded_ax = self.phase_folded_canvas.figure.subplots()
+        
+        # Bayesian visualization axes
+        self.bayesian_ax = self.bayesian_canvas.figure.subplots()
+        self.components_ax = self.components_canvas.figure.subplots(2, 3)  # 2x3 grid for components
+        self.components_ax = self.components_ax.flatten()  # Flatten for easier indexing
+        
         self.image_cbar = None
 
         tabs.addTab(self._create_detector_tab(), "Detector View")
         tabs.addTab(self.single_lc_canvas, "Photometry View")
         tabs.addTab(self._create_detrended_tab(), "Detrended View")
         tabs.addTab(self.phase_folded_canvas, "Phase-Folded View")
+        tabs.addTab(self._create_bayesian_tab(), "Bayesian Results")
+        tabs.addTab(self._create_components_tab(), "Component Analysis")
         self.log_display = QTextEdit(); self.log_display.setReadOnly(True)
         tabs.addTab(self.log_display, "Performance Log")
         
         main_layout.addWidget(tabs)
         container = QWidget(); container.setLayout(main_layout)
         return container
+
+    def _create_bayesian_tab(self):
+        """Create the Bayesian results tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Controls for Bayesian visualization
+        controls_group = QGroupBox("Bayesian Visualization Controls")
+        controls_layout = QHBoxLayout(controls_group)
+        
+        self.show_uncertainties_checkbox = QCheckBox("Show Uncertainties")
+        self.show_uncertainties_checkbox.setChecked(True)
+        self.show_uncertainties_checkbox.toggled.connect(self.update_bayesian_plot)
+        controls_layout.addWidget(self.show_uncertainties_checkbox)
+        
+        self.show_covariance_checkbox = QCheckBox("Show Covariance Matrix")
+        self.show_covariance_checkbox.setChecked(False)
+        self.show_covariance_checkbox.toggled.connect(self.update_bayesian_plot)
+        controls_layout.addWidget(self.show_covariance_checkbox)
+        
+        layout.addWidget(controls_group)
+        layout.addWidget(self.bayesian_canvas)
+        
+        return tab
+    
+    def _create_components_tab(self):
+        """Create the component analysis tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Controls for component visualization
+        controls_group = QGroupBox("Component Analysis Controls")
+        controls_layout = QHBoxLayout(controls_group)
+        
+        self.show_stellar_checkbox = QCheckBox("Stellar Spectrum")
+        self.show_stellar_checkbox.setChecked(True)
+        self.show_stellar_checkbox.toggled.connect(self.update_components_plot)
+        controls_layout.addWidget(self.show_stellar_checkbox)
+        
+        self.show_drift_checkbox = QCheckBox("Drift Model")
+        self.show_drift_checkbox.setChecked(True)
+        self.show_drift_checkbox.toggled.connect(self.update_components_plot)
+        controls_layout.addWidget(self.show_drift_checkbox)
+        
+        self.show_transit_checkbox = QCheckBox("Transit Depth")
+        self.show_transit_checkbox.setChecked(True)
+        self.show_transit_checkbox.toggled.connect(self.update_components_plot)
+        controls_layout.addWidget(self.show_transit_checkbox)
+        
+        self.show_window_checkbox = QCheckBox("Transit Window")
+        self.show_window_checkbox.setChecked(True)
+        self.show_window_checkbox.toggled.connect(self.update_components_plot)
+        controls_layout.addWidget(self.show_window_checkbox)
+        
+        self.show_noise_checkbox = QCheckBox("Noise Model")
+        self.show_noise_checkbox.setChecked(True)
+        self.show_noise_checkbox.toggled.connect(self.update_components_plot)
+        controls_layout.addWidget(self.show_noise_checkbox)
+        
+        layout.addWidget(controls_group)
+        layout.addWidget(self.components_canvas)
+        
+        return tab
 
     def _create_detector_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); info_group = QGroupBox("Star & Planet Info"); info_layout = QVBoxLayout(info_group); self.info_display = QTextEdit(); self.info_display.setReadOnly(True); info_group.setFixedHeight(150); info_layout.addWidget(self.info_display); layout.addWidget(info_group); layout.addWidget(self.image_canvas); self.image_canvas.mpl_connect('motion_notify_event', self.on_mouse_move); return tab
@@ -589,20 +938,43 @@ class DataInspector(QMainWindow):
 
     # --- Core Logic ---
 
-    def run_pipeline_and_update_plots(self):
+    def run_pipeline(self):
+        """Run the appropriate pipeline based on the selected mode."""
         if not (self.observation and self.observation.is_loaded):
             self.statusBar().showMessage("Please load data first.", 5000)
             return
         
-        # Set UI to busy state
-        self._set_ui_busy(True, "pipeline")
+        # Check backend compatibility
+        selected_backend = self.backend_combo.currentText()
+        if self.current_backend and self.current_backend != selected_backend:
+            self.statusBar().showMessage(
+                f"Backend mismatch! Data loaded on {self.current_backend}, but {selected_backend} selected. "
+                "Please reload data with the correct backend.", 10000
+            )
+            return
         
-        # Get pipeline parameters
-        steps_to_run = {name: cb.isChecked() for name, cb in self.calib_checkboxes.items()}
-        mask_method = self.mask_method_combo.currentText()
+        # Determine which pipeline to run based on mode
+        mode = self.pipeline_mode_combo.currentText()
+        
+        if mode == "Traditional Pipeline":
+            self.run_traditional_pipeline()
+        else:  # Bayesian Pipeline
+            self.run_bayesian_pipeline()
+    
+    def run_traditional_pipeline(self):
+        """Run the traditional pipeline with detrending."""
+        # Get detrender
         detrender = self._get_detrender(self.detrend_model_combo.currentText())
+        if detrender is None:
+            return
         
-        # Run entire pipeline asynchronously
+        # Get mask method
+        mask_method = self.mask_method_combo.currentText().lower()
+        
+        # Get steps to run
+        steps_to_run = {k: v.isChecked() for k, v in self.calib_checkboxes.items()}
+        
+        # Run pipeline
         self._run_pipeline_async(detrender, mask_method, steps_to_run)
     
     def _run_pipeline_async(self, detrender, mask_method, steps_to_run):
@@ -735,8 +1107,20 @@ class DataInspector(QMainWindow):
         except Exception as e:
             self._on_detrending_error(str(e))
         finally:
-            # Clean up worker
+            # Clean up worker and GPU memory
             if self.worker:
+                # Explicitly clean up GPU memory if using GPyTorch
+                if hasattr(self.worker, 'detrender') and self.worker.detrender:
+                    detrender_class = self.worker.detrender.__class__.__name__
+                    if 'GPyTorch' in detrender_class or 'GPU' in detrender_class:
+                        try:
+                            import torch
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                                print("DEBUG: Cleared GPU cache after detrending")
+                        except ImportError:
+                            pass
+                
                 self.worker.deleteLater()
                 self.worker = None
     
@@ -762,7 +1146,7 @@ class DataInspector(QMainWindow):
         if busy:
             # Only disable buttons to prevent double-clicks, keep configuration accessible
             self.load_button.setEnabled(False)
-            self.apply_button.setEnabled(False)
+            self.pipeline_button.setEnabled(False)
             
             # Show progress UI
             self.progress_bar.setVisible(True)
@@ -775,7 +1159,7 @@ class DataInspector(QMainWindow):
         else:
             # Enable buttons
             self.load_button.setEnabled(True)
-            self.apply_button.setEnabled(True)
+            self.pipeline_button.setEnabled(True)
             
             # Hide progress UI
             self.progress_bar.setVisible(False)
@@ -804,6 +1188,18 @@ class DataInspector(QMainWindow):
     
     def _abort_pipeline_changes(self):
         """Safely abort any partial pipeline changes."""
+        # Clean up GPU memory if we were using GPyTorch
+        if hasattr(self, 'worker') and self.worker and hasattr(self.worker, 'detrender'):
+            detrender_class = self.worker.detrender.__class__.__name__
+            if 'GPyTorch' in detrender_class or 'GPU' in detrender_class:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        print("DEBUG: Cleared GPU cache after pipeline abort")
+                except ImportError:
+                    pass
+        
         if self.observation and self.observation.is_loaded:
             # Clear any partial pipeline results
             if hasattr(self.observation, 'detrended_light_curves'):
@@ -879,35 +1275,77 @@ class DataInspector(QMainWindow):
     
     def _clear_all_plots(self):
         """Clear all plots to show empty state."""
-        # Clear image plot
-        if hasattr(self, 'image_ax'):
-            self.image_ax.clear()
-            self.image_ax.set_title("No data loaded")
-            if hasattr(self, 'image_canvas'):
-                self.image_canvas.draw()
-        
-        # Clear light curve plots
-        if hasattr(self, 'single_lc_ax'):
-            self.single_lc_ax.clear()
-            self.single_lc_ax.set_title("No data loaded")
-            if hasattr(self, 'single_lc_canvas'):
-                self.single_lc_canvas.draw()
-        
-        if hasattr(self, 'detrended_lc_ax'):
-            self.detrended_lc_ax.clear()
-            self.detrended_lc_ax.set_title("No data loaded")
-            if hasattr(self, 'detrended_lc_canvas'):
-                self.detrended_lc_canvas.draw()
-        
-        if hasattr(self, 'phase_folded_ax'):
-            self.phase_folded_ax.clear()
-            self.phase_folded_ax.set_title("No data loaded")
-            if hasattr(self, 'phase_folded_canvas'):
-                self.phase_folded_canvas.draw()
-        
-        # Clear log display
-        if hasattr(self, 'log_display'):
-            self.log_display.setText("")
+        try:
+            # Clear image plot
+            if hasattr(self, 'image_ax') and self.image_ax is not None:
+                try:
+                    self.image_ax.clear()
+                    self.image_ax.set_title("No data loaded")
+                    if hasattr(self, 'image_canvas') and self.image_canvas is not None:
+                        self.image_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear image plot: {e}")
+            
+            # Clear light curve plots
+            if hasattr(self, 'single_lc_ax') and self.single_lc_ax is not None:
+                try:
+                    self.single_lc_ax.clear()
+                    self.single_lc_ax.set_title("No data loaded")
+                    if hasattr(self, 'single_lc_canvas') and self.single_lc_canvas is not None:
+                        self.single_lc_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear single light curve plot: {e}")
+            
+            if hasattr(self, 'detrended_lc_ax') and self.detrended_lc_ax is not None:
+                try:
+                    self.detrended_lc_ax.clear()
+                    self.detrended_lc_ax.set_title("No data loaded")
+                    if hasattr(self, 'detrended_lc_canvas') and self.detrended_lc_canvas is not None:
+                        self.detrended_lc_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear detrended light curve plot: {e}")
+            
+            if hasattr(self, 'phase_folded_ax') and self.phase_folded_ax is not None:
+                try:
+                    self.phase_folded_ax.clear()
+                    self.phase_folded_ax.set_title("No data loaded")
+                    if hasattr(self, 'phase_folded_canvas') and self.phase_folded_canvas is not None:
+                        self.phase_folded_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear phase folded plot: {e}")
+            
+            # Clear Bayesian plots
+            if hasattr(self, 'bayesian_ax') and self.bayesian_ax is not None:
+                try:
+                    self.bayesian_ax.clear()
+                    self.bayesian_ax.set_title("No Bayesian Results")
+                    if hasattr(self, 'bayesian_canvas') and self.bayesian_canvas is not None:
+                        self.bayesian_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear Bayesian plot: {e}")
+            
+            # Clear component analysis plots
+            if hasattr(self, 'components_ax') and self.components_ax is not None:
+                try:
+                    for ax in self.components_ax:
+                        if ax is not None:
+                            ax.clear()
+                            ax.set_title("No Component Analysis")
+                    if hasattr(self, 'components_canvas') and self.components_canvas is not None:
+                        self.components_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear component analysis plots: {e}")
+            
+            # Clear log display
+            if hasattr(self, 'log_display') and self.log_display is not None:
+                try:
+                    self.log_display.setText("")
+                except Exception as e:
+                    print(f"Warning: Could not clear log display: {e}")
+                    
+        except Exception as e:
+            print(f"Warning: Error in _clear_all_plots: {e}")
+            # Continue execution even if plot clearing fails
 
     def _get_detrender(self, model_name):
         # Check for not implemented methods
@@ -940,11 +1378,12 @@ class DataInspector(QMainWindow):
         # elif model_name == "Multi-Kernel GP":
         # elif model_name == "Transit Window GP":
         
-        # ariel_gp-style methods
-        elif model_name == "AIRS Drift (CPU)":
-            self.statusBar().showMessage("Running AIRS Drift Detrending (CPU)...", 30000)
+        # ariel_gp-style methods with KISS-GP integration
+        elif model_name == "AIRS Drift (CPU) 🚀 KISS-GP":
+            self.statusBar().showMessage("Running AIRS Drift Detrending with KISS-GP (CPU)...", 30000)
             QApplication.processEvents()
-            return detrending.AIRSDriftDetrender(
+            return detrending.create_airs_drift_detrender(
+                instrument="AIRS-CH0",
                 use_gpu=False,
                 avg_kernel=self.airs_avg_kernel_combo.currentText(),
                 avg_length_scale=self.airs_avg_length_spinbox.value(),
@@ -954,11 +1393,12 @@ class DataInspector(QMainWindow):
                 use_sparse=self.airs_sparse_checkbox.isChecked()
             )
         
-        elif model_name == "AIRS Drift (GPU)":
+        elif model_name == "AIRS Drift (GPU) 🚀 KISS-GP ⚡ Fast":
             if GP_GPU_ENABLED:
-                self.statusBar().showMessage("Running AIRS Drift Detrending (GPU)...", 30000)
+                self.statusBar().showMessage("Running AIRS Drift Detrending with KISS-GP (GPU) - Fast Batch Processing...", 30000)
                 QApplication.processEvents()
-                return detrending.AIRSDriftDetrender(
+                return detrending.create_airs_drift_detrender(
+                    instrument="AIRS-CH0",
                     use_gpu=True,
                     avg_kernel=self.airs_avg_kernel_combo.currentText(),
                     avg_length_scale=self.airs_avg_length_spinbox.value(),
@@ -971,17 +1411,19 @@ class DataInspector(QMainWindow):
         elif model_name == "FGS Drift (CPU)":
             self.statusBar().showMessage("Running FGS Drift Detrending (CPU)...", 30000)
             QApplication.processEvents()
-            return detrending.FGSDriftDetrender(
+            return detrending.create_fgs_drift_detrender(
+                instrument="FGS1",
                 use_gpu=False,
                 kernel=self.fgs_kernel_combo.currentText(),
                 length_scale=self.fgs_length_spinbox.value()
             )
         
-        elif model_name == "FGS Drift (GPU)":
+        elif model_name == "FGS Drift (GPU) ⚡ Fast":
             if GP_GPU_ENABLED:
-                self.statusBar().showMessage("Running FGS Drift Detrending (GPU)...", 30000)
+                self.statusBar().showMessage("Running FGS Drift Detrending (GPU) - Fast Batch Processing...", 30000)
                 QApplication.processEvents()
-                return detrending.FGSDriftDetrender(
+                return detrending.create_fgs_drift_detrender(
+                    instrument="FGS1",
                     use_gpu=True,
                     kernel=self.fgs_kernel_combo.currentText(),
                     length_scale=self.fgs_length_spinbox.value()
@@ -1016,14 +1458,35 @@ class DataInspector(QMainWindow):
         self.log_display.setText("\n".join(self.observation.calibration_log))
         self.update_image_plot()
         self.update_light_curve_plots()
+        # Update Bayesian plots if results are available
+        if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
+            self.update_bayesian_plot()
+            self.update_components_plot()
     def update_image_plot(self):
         if not (self.observation and self.observation.is_loaded): return
-        if self.image_cbar: self.image_cbar.remove(); self.image_cbar = None
+        # Safely remove the previous colorbar if it exists and is still in the figure
+        if self.image_cbar is not None:
+            try:
+                if hasattr(self.image_cbar, 'ax') and self.image_cbar.ax in self.image_canvas.figure.axes:
+                    self.image_cbar.remove()
+            except Exception as e:
+                print(f"Warning: Could not remove image colorbar: {e}")
+            self.image_cbar = None
         self.image_ax.clear()
         processed_signal = self.observation.get_data(return_type='numpy'); frame_idx = self.frame_slider.value()
         if self.calib_checkboxes["cds"].isChecked(): frame_idx //= 2
         if frame_idx >= processed_signal.shape[0]: frame_idx = 0
-        img_data = processed_signal[frame_idx]; im = self.image_ax.imshow(img_data, aspect='auto', cmap='viridis', origin='lower'); self.image_cbar = self.image_canvas.figure.colorbar(im, ax=self.image_ax); self.image_ax.set_title(f"Detector Frame (Index: {frame_idx})"); self.image_canvas.draw()
+        img_data = processed_signal[frame_idx]
+        try:
+            im = self.image_ax.imshow(img_data, aspect='auto', cmap='viridis', origin='lower')
+            self.image_cbar = self.image_canvas.figure.colorbar(im, ax=self.image_ax)
+            self.image_ax.set_title(f"Detector Frame (Index: {frame_idx})")
+            self.image_canvas.draw()
+        except Exception as e:
+            print(f"Warning: Could not create image colorbar: {e}")
+            im = self.image_ax.imshow(img_data, aspect='auto', cmap='viridis', origin='lower')
+            self.image_ax.set_title(f"Detector Frame (Index: {frame_idx})")
+            self.image_canvas.draw()
     def update_light_curve_plots(self):
         if not (self.observation and self.observation.is_loaded): return
         self.update_photometry_plot(); self.update_detrended_plot(); self.update_phase_folded_plot()
@@ -1095,6 +1558,10 @@ class DataInspector(QMainWindow):
         try:
             self.observation = observation
             
+            # Track the backend used for loading
+            self.current_backend = self.backend_combo.currentText()
+            self.current_instrument = self.instrument_combo.currentText()
+            
             # Update star info display
             if self.star_info_df is not None and int(self.planet_combo.currentText()) in self.star_info_df.index:
                 self.info_display.setText(self.star_info_df.loc[int(self.planet_combo.currentText())].to_string())
@@ -1114,8 +1581,23 @@ class DataInspector(QMainWindow):
             # Set UI to idle state
             self._set_ui_busy(False)
             
-            # Run pipeline
-            self.run_pipeline_and_update_plots()
+            # Update detrending options based on loaded instrument and backend
+            self.update_detrending_options()
+            
+            # Lock navigation, unlock settings
+            self._lock_navigation_panel()
+            self._unlock_settings_panel()
+            self.load_button.setText("Change Data")
+            self.load_button.clicked.disconnect()
+            self.load_button.clicked.connect(self._unlock_for_new_data)
+            self.navigation_locked = True
+            
+            # Update current data label
+            self.current_data_label.setText(f"Current Data: Instrument = {self.current_instrument} | Backend = {self.current_backend}")
+
+            # Don't run pipeline automatically - wait for user to click "Apply"
+            # Just update the raw plots
+            self._update_all_plots()
             
         except Exception as e:
             self._on_loading_error(str(e))
@@ -1157,15 +1639,43 @@ class DataInspector(QMainWindow):
         if not planet_dir.exists(): return
         obs_ids = sorted([f.stem.split('_')[-1] for f in planet_dir.glob(f"{self.instrument_combo.currentText()}_signal_*.parquet") if f.stem.split('_')[-1].isdigit()], key=int)
         if obs_ids: self.obs_combo.addItems(obs_ids)
+        
+        # Update wavelength controls based on instrument type
+        is_fgs = (self.instrument_combo.currentText() == 'FGS1')
+        self.wavelength_slider.setEnabled(not is_fgs)
+        self.wavelength_spinbox.setEnabled(not is_fgs)
+        
+        # Set wavelength slider values based on instrument
+        if is_fgs:
+            # FGS1: Set to 0 (only one wavelength) and disable
+            self.wavelength_slider.setRange(0, 0)
+            self.wavelength_spinbox.setRange(0, 0)
+            self.wavelength_slider.setValue(0)
+            self.wavelength_spinbox.setValue(0)
+        else:
+            # AIRS-CH0: Enable and set to 0 (first wavelength)
+            if self.observation and self.observation.raw_signal is not None:
+                max_wl = self.observation.raw_signal.shape[2] - 1
+                self.wavelength_slider.setRange(0, max_wl)
+                self.wavelength_spinbox.setRange(0, max_wl)
+                self.wavelength_slider.setValue(0)
+                self.wavelength_spinbox.setValue(0)
+            else:
+                # No data loaded yet, just set a reasonable default range
+                self.wavelength_slider.setRange(0, 100)
+                self.wavelength_spinbox.setRange(0, 100)
+                self.wavelength_slider.setValue(0)
+                self.wavelength_spinbox.setValue(0)
     def update_detrending_options(self):
-        """Update the detrending dropdown based on the selected backend and instrument."""
-        current_backend = self.backend_combo.currentText()
-        current_instrument = self.instrument_combo.currentText()
+        """Update the detrending dropdown based on the loaded backend and instrument."""
+        # Use the actual loaded data, not the dropdown selections
+        current_backend = self.current_backend if self.current_backend else self.backend_combo.currentText()
+        current_instrument = self.current_instrument if self.current_instrument else self.instrument_combo.currentText()
         
         # Clear current options
         self.detrend_model_combo.clear()
         
-        # Build detrending options based on selected backend and instrument
+        # Build detrending options based on loaded backend and instrument
         detrend_options = []
         
         if current_backend == "cpu":
@@ -1177,19 +1687,10 @@ class DataInspector(QMainWindow):
                 "Hybrid GP (CPU)"
             ])
             
-            # Advanced models (if sklearn available)
-            # Note: These methods are not yet implemented
-            # if SKLEARN_GP_ENABLED:
-            #     detrend_options.extend([
-            #         "Advanced GP (2-Step)",
-            #         "Multi-Kernel GP", 
-            #         "Transit Window GP"
-            #     ])
-            
-            # Instrument-specific ariel_gp-style models (CPU)
+            # Instrument-specific ariel_gp-style models (CPU) - Fallback versions
             if current_instrument == "AIRS-CH0":
                 detrend_options.extend([
-                    "AIRS Drift (CPU)",
+                    "AIRS Drift (CPU) 🚀 KISS-GP",
                     "Bayesian Multi-Component (CPU)"
                 ])
             elif current_instrument == "FGS1":
@@ -1206,15 +1707,15 @@ class DataInspector(QMainWindow):
                     "Hybrid GP (GPU)"
                 ])
                 
-                # Instrument-specific ariel_gp-style models (GPU)
+                # Instrument-specific ariel_gp-style models (GPU) - Prioritize fast GPU versions
                 if current_instrument == "AIRS-CH0":
                     detrend_options.extend([
-                        "AIRS Drift (GPU)",
+                        "AIRS Drift (GPU) 🚀 KISS-GP ⚡ Fast",  # Prioritize GPU version
                         "Bayesian Multi-Component (GPU)"
                     ])
                 elif current_instrument == "FGS1":
                     detrend_options.extend([
-                        "FGS Drift (GPU)",
+                        "FGS Drift (GPU) ⚡ Fast",  # Prioritize GPU version
                         "Bayesian Multi-Component (GPU)"
                     ])
             else:
@@ -1241,9 +1742,174 @@ class DataInspector(QMainWindow):
         if detrend_options:
             self.detrend_model_combo.setCurrentIndex(0)
 
+    def on_pipeline_mode_change(self, mode: str):
+        """Handle pipeline mode changes."""
+        print(f"DEBUG: Pipeline mode changed to: {mode}")
+        if mode == "Traditional Pipeline":
+            # Show detrending tab, hide Bayesian tab
+            self.settings_tabs.setTabVisible(self.detrending_tab_index, True)
+            self.settings_tabs.setTabVisible(self.bayesian_tab_index, False)
+            self.pipeline_button.setText("Apply Changes & Rerun Pipeline")
+            self.pipeline_button.setEnabled(self.observation is not None and self.observation.is_loaded)
+            print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
+            
+            # Update traditional plots to ensure they're visible
+            if self.observation and self.observation.is_loaded:
+                self._update_all_plots()
+        else:  # Bayesian Pipeline
+            # Hide detrending tab, show Bayesian tab
+            self.settings_tabs.setTabVisible(self.detrending_tab_index, False)
+            self.settings_tabs.setTabVisible(self.bayesian_tab_index, True)
+            self.pipeline_button.setText("Run Bayesian Pipeline")
+            self.pipeline_button.setEnabled(self.observation is not None and self.observation.is_loaded)
+            print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
+            
+            # Update Bayesian plots if results are available
+            if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
+                self.update_bayesian_plot()
+                self.update_components_plot()
+        # Force a repaint to ensure the button text is updated
+        self.pipeline_button.repaint()
+
+    def run_bayesian_pipeline(self):
+        """Run the Bayesian pipeline."""
+        if not (self.observation and self.observation.is_loaded):
+            self.statusBar().showMessage("Please load data first.", 5000)
+            return
+        
+        # Check backend compatibility
+        selected_backend = self.backend_combo.currentText()
+        if self.current_backend and self.current_backend != selected_backend:
+            self.statusBar().showMessage(
+                f"Backend mismatch! Data loaded on {self.current_backend}, but {selected_backend} selected. "
+                "Please reload data with the correct backend.", 10000
+            )
+            return
+        
+        # Clear previous Bayesian results to ensure clean state
+        if hasattr(self, 'bayesian_results'):
+            self.bayesian_results = None
+        
+        # Force GPU cleanup before starting
+        force_gpu_cleanup()
+        
+        # Set UI to busy state
+        self._set_ui_busy(True, "bayesian_pipeline")
+        
+        # Get pipeline parameters
+        pipeline_params = {
+            'instrument': self.current_instrument,
+            'use_gpu': self.current_backend == 'gpu',
+            'n_pca': self.bayesian_pca_spinbox.value(),
+            'n_iter': self.bayesian_iter_spinbox.value(),
+            'n_samples': self.bayesian_samples_spinbox.value(),
+            'batch_size': self.bayesian_batch_spinbox.value(),
+            'drift_batch_size': self.drift_batch_spinbox.value()
+        }
+        
+        # Automatically reduce batch sizes for FGS to prevent OOM
+        if self.current_instrument == "FGS1":
+            pipeline_params['drift_batch_size'] = min(pipeline_params['drift_batch_size'], 2)
+            pipeline_params['batch_size'] = min(pipeline_params['batch_size'], 10)
+            print(f"DEBUG: Reduced batch sizes for FGS - Drift: {pipeline_params['drift_batch_size']}, MCMC: {pipeline_params['batch_size']}")
+        
+        # Run Bayesian pipeline asynchronously
+        self._run_bayesian_pipeline_async(pipeline_params)
+    
+    def _run_bayesian_pipeline_async(self, pipeline_params):
+        """Run Bayesian pipeline asynchronously with progress tracking."""
+        # Create and start worker
+        self.bayesian_worker = BayesianPipelineWorker(self.observation, pipeline_params)
+        self.bayesian_worker.progress_signal.connect(self._on_bayesian_pipeline_progress)
+        self.bayesian_worker.finished_signal.connect(self._on_bayesian_pipeline_finished)
+        self.bayesian_worker.error_signal.connect(self._on_bayesian_pipeline_error)
+        self.bayesian_worker.start()
+    
+    def _on_bayesian_pipeline_progress(self, message: str):
+        """Handle progress updates from the Bayesian pipeline worker."""
+        # Update progress label
+        self.progress_label.setText(message)
+        
+        # Update status bar
+        self.statusBar().showMessage(message, 1000)
+        
+        # Update progress bar
+        if "creating" in message.lower():
+            self.progress_bar.setValue(20)
+        elif "fitting" in message.lower():
+            self.progress_bar.setValue(50)
+        elif "mcmc" in message.lower():
+            self.progress_bar.setValue(80)
+    
+    def _on_bayesian_pipeline_finished(self, results):
+        """Handle completion of the Bayesian pipeline."""
+        try:
+            # Update progress for plotting
+            self.progress_bar.setValue(95)
+            self.progress_label.setText("Updating plots...")
+            
+            # Store results
+            self.bayesian_results = results
+            
+            # Ensure we're in Bayesian mode and the correct tab is visible
+            current_mode = self.pipeline_mode_combo.currentText()
+            if current_mode != "Bayesian Pipeline":
+                # Force the mode to Bayesian Pipeline
+                self.pipeline_mode_combo.setCurrentText("Bayesian Pipeline")
+                self.on_pipeline_mode_change("Bayesian Pipeline")
+            
+            # Update only Bayesian plots, not traditional plots
+            if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
+                self.update_bayesian_plot()
+                self.update_components_plot()
+            
+            # Complete
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("Bayesian Pipeline completed")
+            
+            # Set UI to idle state
+            self._set_ui_busy(False)
+            
+            self.statusBar().showMessage("Bayesian Pipeline finished.", 5000)
+            
+        except Exception as e:
+            self._on_bayesian_pipeline_error(str(e))
+        finally:
+            # Clean up GPU memory after Bayesian pipeline
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print("DEBUG: Cleared GPU cache after Bayesian pipeline completion")
+            except ImportError:
+                pass
+            
+            # Clean up worker
+            if hasattr(self, 'bayesian_worker') and self.bayesian_worker:
+                self.bayesian_worker.deleteLater()
+                self.bayesian_worker = None
+    
+    def _on_bayesian_pipeline_error(self, error_message: str):
+        """Handle errors during Bayesian pipeline execution."""
+        # Set UI to idle state
+        self._set_ui_busy(False)
+        
+        # Show error (but not for user stops)
+        if "stopped by user" not in error_message.lower():
+            self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
+            print(f"ERROR: {error_message}")
+        else:
+            self.statusBar().showMessage("Bayesian Pipeline stopped by user", 5000)
+        
+        # Clean up worker
+        if hasattr(self, 'bayesian_worker') and self.bayesian_worker:
+            self.bayesian_worker.deleteLater()
+            self.bayesian_worker = None
+
     def on_detrend_model_change(self, model_name):
         index = self.model_widget_map.get(model_name, 0)
         self.detrend_params_stack.setCurrentIndex(index)
+    
     def on_mouse_move(self, event):
         if not (event.inaxes and event.inaxes == self.image_ax and self.observation and self.observation.processed_signal is not None):
             return
@@ -1260,8 +1926,248 @@ class DataInspector(QMainWindow):
             # Display the coordinates and value in the status bar.
             self.statusBar().showMessage(f"Pixel (x={x}, y={y}) | Value: {pixel_value:.2f}")
 
+    def _unlock_for_new_data(self):
+        """Unlock navigation panel to allow loading new data."""
+        self._unlock_navigation_panel()
+        self._lock_settings_panel()
+        self.load_button.setText("Load Data")
+        self.load_button.clicked.disconnect()
+        self.load_button.clicked.connect(self.load_data)
+        self.navigation_locked = False
+        
+        # Clear current data tracking
+        self.current_backend = None
+        self.current_instrument = None
+        self.current_data_label.setText("Current Data: Instrument = None | Backend = None")
+        
+        # Clear observation and Bayesian results
+        self.observation = None
+        if hasattr(self, 'bayesian_results'):
+            self.bayesian_results = None
+        
+        # Clear all plots
+        self._clear_all_plots()
+
+    def _lock_navigation_panel(self):
+        """Lock the navigation panel (disable all controls)."""
+        self.split_combo.setEnabled(False)
+        self.planet_combo.setEnabled(False)
+        self.obs_combo.setEnabled(False)
+        self.instrument_combo.setEnabled(False)
+        self.backend_combo.setEnabled(False)
+        # Don't disable the load button as it becomes the change button
+    
+    def _unlock_navigation_panel(self):
+        """Unlock the navigation panel (enable all controls)."""
+        self.split_combo.setEnabled(True)
+        self.planet_combo.setEnabled(True)
+        self.obs_combo.setEnabled(True)
+        self.instrument_combo.setEnabled(True)
+        self.backend_combo.setEnabled(True)
+    
+    def _lock_settings_panel(self):
+        """Lock the settings panel (disable all controls)."""
+        # Disable all settings controls
+        for checkbox in self.calib_checkboxes.values():
+            checkbox.setEnabled(False)
+        self.detrend_model_combo.setEnabled(False)
+        self.detrend_params_stack.setEnabled(False)
+        self.mask_method_combo.setEnabled(False)
+        self.bins_spinbox.setEnabled(False)
+        self.pipeline_button.setEnabled(False)
+    
+    def _unlock_settings_panel(self):
+        """Unlock the settings panel (enable all controls)."""
+        # Enable all settings controls
+        for checkbox in self.calib_checkboxes.values():
+            checkbox.setEnabled(True)
+        self.detrend_model_combo.setEnabled(True)
+        self.detrend_params_stack.setEnabled(True)
+        self.mask_method_combo.setEnabled(True)
+        self.bins_spinbox.setEnabled(True)
+        self.pipeline_button.setEnabled(True)
+
+    def update_bayesian_plot(self):
+        """Update the Bayesian results plot."""
+        if not hasattr(self, 'bayesian_results') or self.bayesian_results is None:
+            # Clear the plot if no results
+            self.bayesian_ax.clear()
+            self.bayesian_ax.set_title("No Bayesian Results Available")
+            self.bayesian_ax.set_xlabel("Wavelength Index")
+            self.bayesian_ax.set_ylabel("Transit Depth")
+            self.bayesian_canvas.draw()
+            return
+        
+        # Clear the plot
+        self.bayesian_ax.clear()
+        
+        # Get results
+        predictions = self.bayesian_results['predictions']
+        uncertainties = self.bayesian_results['uncertainties']
+        covariance = self.bayesian_results['covariance']
+        
+        # Create wavelength indices
+        wavelengths = np.arange(len(predictions))
+        
+        # Plot transit depths
+        self.bayesian_ax.plot(wavelengths, predictions, 'b-', linewidth=2, label='Transit Depth')
+        
+        # Show uncertainties if requested
+        if self.show_uncertainties_checkbox.isChecked():
+            self.bayesian_ax.fill_between(wavelengths, 
+                                        predictions - uncertainties, 
+                                        predictions + uncertainties, 
+                                        alpha=0.3, color='blue', label='±1σ Uncertainty')
+        
+        # Show covariance matrix if requested
+        if self.show_covariance_checkbox.isChecked():
+            try:
+                # Create a new figure for covariance matrix
+                fig, ax = plt.subplots(figsize=(8, 6))
+                im = ax.imshow(covariance, cmap='viridis', aspect='auto')
+                ax.set_title('Covariance Matrix')
+                ax.set_xlabel('Wavelength Index')
+                ax.set_ylabel('Wavelength Index')
+                # Store the colorbar object and set its label properly
+                cbar = fig.colorbar(im, ax=ax)
+                cbar.set_label('Covariance')
+                fig.tight_layout()
+                fig.show()
+            except Exception as e:
+                print(f"Warning: Could not display covariance matrix: {e}")
+                # Continue without showing the covariance matrix
+        
+        # Format the plot
+        self.bayesian_ax.set_title("Bayesian Pipeline Results")
+        self.bayesian_ax.set_xlabel("Wavelength Index")
+        self.bayesian_ax.set_ylabel("Transit Depth")
+        self.bayesian_ax.legend()
+        self.bayesian_ax.grid(True, alpha=0.3)
+        
+        # Add backend info
+        if hasattr(self, 'bayesian_results') and 'pipeline_params' in self.bayesian_results:
+            pipeline_params = self.bayesian_results['pipeline_params']
+            info_text = "Backend Info:\n"
+            info_text += f"  Instrument: {pipeline_params.get('instrument', 'Unknown')}\n"
+            info_text += f"  Backend: {'gpu' if pipeline_params.get('use_gpu', False) else 'cpu'}\n"
+            info_text += f"  PCA Components: {pipeline_params.get('n_pca', 1)}\n"
+            info_text += f"  MCMC Samples: {pipeline_params.get('n_samples', 100)}\n"
+            info_text += f"  Batch Size: {pipeline_params.get('batch_size', 20)}\n"
+            self.bayesian_ax.text(0.02, 0.98, info_text, transform=self.bayesian_ax.transAxes, 
+                                verticalalignment='top', fontsize=8, 
+                                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        self.bayesian_canvas.draw()
+    
+    def update_components_plot(self):
+        """Update the component analysis plot."""
+        if not hasattr(self, 'bayesian_results') or self.bayesian_results is None:
+            # Clear all subplots
+            for ax in self.components_ax:
+                ax.clear()
+                ax.set_title("No Data")
+            self.components_canvas.draw()
+            return
+        
+        # Check if we have fitted components
+        if 'fitted_components' not in self.bayesian_results:
+            # Clear all subplots and show message
+            for ax in self.components_ax:
+                ax.clear()
+                ax.set_title("No Component Data")
+            self.components_canvas.draw()
+            return
+        
+        fitted_components = self.bayesian_results['fitted_components']
+        
+        # Plot each component in a separate subplot
+        component_names = list(fitted_components.keys())
+        for i, ax in enumerate(self.components_ax):
+            ax.clear()
+            
+            if i < len(component_names):
+                component_name = component_names[i]
+                component_data = fitted_components[component_name]
+                
+                # Plot the component data
+                if component_data is not None and len(component_data) > 0:
+                    if component_name == 'stellar':
+                        # Stellar spectrum: plot as wavelength-dependent
+                        wavelengths = np.arange(len(component_data))
+                        ax.plot(wavelengths, component_data, 'r-', linewidth=2)
+                        ax.set_title(f"Stellar Spectrum")
+                        ax.set_xlabel("Wavelength Index")
+                        ax.set_ylabel("Flux")
+                    elif component_name == 'drift':
+                        # Drift model: plot as time series for first wavelength
+                        if len(component_data.shape) > 1:
+                            # Multi-wavelength drift, show first wavelength
+                            time_points = np.arange(component_data.shape[0])
+                            ax.plot(time_points, component_data[:, 0], 'g-', linewidth=2)
+                            ax.set_title(f"Drift Model (Wavelength 0)")
+                            ax.set_xlabel("Time Index")
+                            ax.set_ylabel("Drift Factor")
+                        else:
+                            # Single wavelength drift
+                            time_points = np.arange(len(component_data))
+                            ax.plot(time_points, component_data, 'g-', linewidth=2)
+                            ax.set_title(f"Drift Model")
+                            ax.set_xlabel("Time Index")
+                            ax.set_ylabel("Drift Factor")
+                    elif component_name == 'transit_depth':
+                        # Transit depths: plot as wavelength-dependent
+                        wavelengths = np.arange(len(component_data))
+                        ax.plot(wavelengths, component_data, 'b-', linewidth=2)
+                        ax.set_title(f"Transit Depth Variation")
+                        ax.set_xlabel("Wavelength Index")
+                        ax.set_ylabel("Transit Depth")
+                    elif component_name == 'transit_window':
+                        # Transit window: plot as time series
+                        time_points = np.arange(len(component_data))
+                        ax.plot(time_points, component_data, 'purple', linewidth=2)
+                        ax.set_title(f"Transit Window")
+                        ax.set_xlabel("Time Index")
+                        ax.set_ylabel("Transit Window")
+                    elif component_name == 'noise':
+                        # Noise levels: plot as wavelength-dependent
+                        wavelengths = np.arange(len(component_data))
+                        ax.plot(wavelengths, component_data, 'orange', linewidth=2)
+                        ax.set_title(f"Noise Levels")
+                        ax.set_xlabel("Wavelength Index")
+                        ax.set_ylabel("Noise Level")
+                    else:
+                        # Generic component plotting
+                        data_points = np.arange(len(component_data))
+                        ax.plot(data_points, component_data, 'k-', linewidth=2)
+                        ax.set_title(f"{component_name.replace('_', ' ').title()}")
+                        ax.set_xlabel("Index")
+                        ax.set_ylabel("Value")
+                    
+                    ax.grid(True, alpha=0.3)
+                else:
+                    ax.set_title(f"{component_name.replace('_', ' ').title()}")
+                    ax.text(0.5, 0.5, "No data available", 
+                           transform=ax.transAxes, ha='center', va='center', fontsize=10,
+                           bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+            else:
+                ax.set_title("No Component")
+                ax.text(0.5, 0.5, "No component data", 
+                       transform=ax.transAxes, ha='center', va='center', fontsize=10,
+                       bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        
+        self.components_canvas.figure.tight_layout()
+        self.components_canvas.draw()
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # Set application icon
+    icon_path = Path(__file__).parent.parent / "arielml" / "assets" / "ESA_Ariel_official_mission_patch.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    else:
+        print(f"Warning: Application icon not found at {icon_path}")
+    
     inspector = DataInspector()
     inspector.show()
     sys.exit(app.exec())
