@@ -31,24 +31,13 @@ class NoiseModel:
     
     def fit(self, flux: np.ndarray, points_per_bin: Optional[np.ndarray] = None) -> np.ndarray:
         """Fit noise levels per wavelength."""
-        # Handle backend conversion
-        if self.backend_name == 'gpu':
-            # For GPU, we'll compute on CPU for now (simple operation)
-            if hasattr(flux, 'get'):  # CuPy array
-                flux_cpu = flux.get()
-            elif hasattr(flux, 'cpu'):  # PyTorch tensor
-                flux_cpu = flux.cpu().numpy()
-            else:
-                flux_cpu = flux
-                
-            points_per_bin_cpu = points_per_bin
-            if points_per_bin is not None:
-                if hasattr(points_per_bin, 'get'):  # CuPy array
-                    points_per_bin_cpu = points_per_bin.get()
-                elif hasattr(points_per_bin, 'cpu'):  # PyTorch tensor
-                    points_per_bin_cpu = points_per_bin.cpu().numpy()
-                else:
-                    points_per_bin_cpu = points_per_bin
+        # Convert to backend arrays
+        flux = self.xp.asarray(flux)
+        
+        # For GPU, move to CPU for optimization
+        if self.backend == 'gpu':
+            flux_cpu = flux.get() if hasattr(flux, 'get') else flux
+            points_per_bin_cpu = points_per_bin.get() if hasattr(points_per_bin, 'get') else points_per_bin if points_per_bin is not None else None
         else:
             flux_cpu = flux
             points_per_bin_cpu = points_per_bin
@@ -68,7 +57,7 @@ class NoiseModel:
         if hasattr(self.noise_levels, 'get'):  # CuPy array
             return self.noise_levels.get()
         elif hasattr(self.noise_levels, 'cpu'):  # PyTorch tensor
-            return self.noise_levels.cpu().numpy()
+            return self.noise_levels.get() if hasattr(self.noise_levels, 'get') else self.noise_levels.cpu().numpy()
         else:
             return self.noise_levels
     

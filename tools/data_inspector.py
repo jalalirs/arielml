@@ -8,7 +8,7 @@ sys.path.insert(0, str(project_root))
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
     QPushButton, QSlider, QLabel, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, QStatusBar,
-    QTextEdit, QTabWidget, QStackedWidget, QProgressBar
+    QTextEdit, QTabWidget, QStackedWidget, QProgressBar, QFormLayout, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon
@@ -23,7 +23,7 @@ from matplotlib.patches import Rectangle
 from arielml.data.observation import DataObservation
 from arielml.data import loaders, detrending
 from arielml.pipelines.bayesian_pipeline import BayesianPipeline
-from arielml.config import DATASET_DIR, PHOTOMETRY_APERTURES
+from arielml.config import DATASET_DIR, PHOTOMETRY_APERTURES, WAVELENGTH_RANGES
 from arielml.backend import GPU_ENABLED, GP_GPU_ENABLED
 from arielml.utils.signals import DetrendingProgress
 
@@ -44,6 +44,258 @@ try:
     SKLEARN_GP_ENABLED = True
 except ImportError:
     SKLEARN_GP_ENABLED = False
+
+
+class BayesianPlotter:
+    """Handles plotting of Bayesian analysis results with support for single and multiple points."""
+    
+    def __init__(self, ax, canvas):
+        self.ax = ax
+        self.canvas = canvas
+        
+    def plot_results(self, bayesian_results, observation, show_uncertainties=True, 
+                    show_ground_truth=True, log_scale=False):
+        """Plot Bayesian results with appropriate visualization for data type."""
+        if not bayesian_results:
+            self._plot_no_results(observation)
+            return
+            
+        # Clear the plot
+        self.ax.clear()
+        
+        # Get results
+        predictions = bayesian_results['predictions']
+        uncertainties = bayesian_results['uncertainties']
+        
+        # Determine if we have single or multiple points
+        if len(predictions) == 1:
+            self._plot_single_point(predictions, uncertainties, bayesian_results, 
+                                  observation, show_uncertainties, show_ground_truth, log_scale)
+        else:
+            self._plot_multiple_points(predictions, uncertainties, bayesian_results, 
+                                     observation, show_uncertainties, show_ground_truth, log_scale)
+        
+        # Add backend info
+        self._add_backend_info(bayesian_results)
+        
+        # Final formatting
+        self._format_plot(observation, log_scale)
+        self.canvas.draw()
+    
+    def _plot_no_results(self, observation):
+        """Handle case when no Bayesian results are available."""
+        if observation and observation.has_ground_truth():
+            self._show_ground_truth_preview(observation)
+        else:
+            self.ax.clear()
+            self.ax.set_title("No Bayesian Results Available")
+            self.ax.set_xlabel("Wavelength (μm)" if observation and observation.has_wavelengths() else "Wavelength Index")
+            self.ax.set_ylabel("Transit Depth")
+            self.canvas.draw()
+    
+    def _plot_single_point(self, predictions, uncertainties, bayesian_results, 
+                          observation, show_uncertainties, show_ground_truth, log_scale):
+        """Plot single point with appropriate visualization."""
+        # Create a simple x-axis for single point
+        x_pos = 0.5
+        
+        # Plot prediction as a point
+        self.ax.scatter([x_pos], predictions, s=100, c='blue', alpha=0.8, 
+                       label='Prediction', zorder=3)
+        
+        # Plot uncertainty as error bar
+        if show_uncertainties:
+            self.ax.errorbar([x_pos], predictions, yerr=[uncertainties], 
+                           fmt='none', capsize=10, capthick=2, 
+                           color='blue', alpha=0.6, label='±1σ Uncertainty')
+        
+        # Plot ground truth if available
+        if observation and observation.has_ground_truth() and show_ground_truth:
+            ground_truth = observation.get_ground_truth()
+            if len(ground_truth) >= 1:
+                gt_value = ground_truth[0] if len(ground_truth) > 0 else ground_truth
+                self.ax.scatter([x_pos], [gt_value], s=100, c='red', alpha=0.8, 
+                               marker='s', label='Ground Truth', zorder=3)
+                
+                # Calculate and display metrics
+                metrics = self._calculate_metrics(predictions, [gt_value])
+                self._add_metrics_text(metrics)
+        
+        # Set appropriate x-axis
+        self.ax.set_xlim(0, 1)
+        self.ax.set_xticks([x_pos])
+        self.ax.set_xticklabels(['FGS1'])
+        
+        # Set y-axis limits with appropriate padding
+        all_values = list(predictions)
+        if observation and observation.has_ground_truth() and show_ground_truth:
+            ground_truth = observation.get_ground_truth()
+            if len(ground_truth) >= 1:
+                all_values.append(ground_truth[0] if len(ground_truth) > 0 else ground_truth)
+        
+        if all_values:
+            min_val, max_val = min(all_values), max(all_values)
+            range_val = max_val - min_val
+            padding = range_val * 0.2 if range_val > 0 else 0.1
+            self.ax.set_ylim(min_val - padding, max_val + padding)
+    
+    def _plot_multiple_points(self, predictions, uncertainties, bayesian_results, 
+                             observation, show_uncertainties, show_ground_truth, log_scale):
+        """Plot multiple points as a line chart."""
+        # Create wavelength array
+        wavelengths = self._get_wavelengths(observation, len(predictions))
+        
+        # Plot transit depths
+        self.ax.plot(wavelengths, predictions, 'b-', linewidth=2, alpha=0.8, label='Prediction')
+        
+        # Show uncertainties
+        if show_uncertainties:
+            self.ax.fill_between(wavelengths, 
+                               predictions - uncertainties, 
+                               predictions + uncertainties, 
+                               alpha=0.3, color='blue', label='±1σ Uncertainty')
+        
+        # Show ground truth
+        if observation and observation.has_ground_truth() and show_ground_truth:
+            ground_truth = observation.get_ground_truth()
+            if len(wavelengths) >= len(ground_truth):
+                gt_wavelengths = wavelengths[:len(ground_truth)]
+            else:
+                ground_truth = ground_truth[:len(wavelengths)]
+                gt_wavelengths = wavelengths
+            
+            self.ax.plot(gt_wavelengths, ground_truth, 'r--', linewidth=3, alpha=0.9, label='Ground Truth')
+            
+            # Calculate and display metrics
+            metrics = self._calculate_metrics(predictions[:len(ground_truth)], ground_truth)
+            self._add_metrics_text(metrics)
+    
+    def _get_wavelengths(self, observation, n_predictions):
+        """Get appropriate wavelength array for plotting."""
+        if observation and observation.has_wavelengths():
+            wavelengths = observation.get_wavelengths()
+            if len(wavelengths) >= n_predictions:
+                return wavelengths[:n_predictions]
+        return np.arange(n_predictions)
+    
+    def _calculate_metrics(self, predictions, ground_truth):
+        """Calculate metrics between predictions and ground truth."""
+        if len(predictions) != len(ground_truth):
+            return {}
+        
+        predictions = np.array(predictions)
+        ground_truth = np.array(ground_truth)
+        
+        # Calculate metrics
+        mse = np.mean((predictions - ground_truth) ** 2)
+        rms_error = np.sqrt(mse)
+        mae = np.mean(np.abs(predictions - ground_truth))
+        
+        # Calculate correlation coefficient
+        if len(predictions) > 1:
+            correlation = np.corrcoef(predictions, ground_truth)[0, 1]
+        else:
+            correlation = 1.0 if predictions[0] == ground_truth[0] else 0.0
+        
+        return {
+            'rms_error': rms_error,
+            'mae': mae,
+            'correlation': correlation
+        }
+    
+    def _add_metrics_text(self, metrics):
+        """Add metrics text to the plot."""
+        if not metrics:
+            return
+            
+        metrics_text = f"Metrics:\n"
+        metrics_text += f"RMSE: {metrics['rms_error']:.4f}\n"
+        metrics_text += f"MAE: {metrics['mae']:.4f}\n"
+        metrics_text += f"R²: {metrics['correlation']:.4f}"
+        
+        self.ax.text(0.02, 0.02, metrics_text, transform=self.ax.transAxes, 
+                    verticalalignment='bottom', fontsize=9, 
+                    bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+    
+    def _add_backend_info(self, bayesian_results):
+        """Add backend information to the plot."""
+        backend_info = bayesian_results.get('backend_info', {})
+        calibration_info = bayesian_results.get('calibration_info', {})
+        
+        info_text = "Backend Info:\n"
+        for component, info in backend_info.items():
+            if component not in ['sigma_fudger', 'mean_bias_fitter']:  # Skip these, we'll show them separately
+                info_text += f"{component}: {info}\n"
+        
+        # Add calibration info
+        if calibration_info:
+            info_text += "\nCalibration:\n"
+            if calibration_info.get('sigma_fudger_enabled', False):
+                fudge_factor = calibration_info.get('sigma_fudge_factor', 'N/A')
+                info_text += f"Sigma Fudger: {fudge_factor}\n"
+            if calibration_info.get('mean_bias_fitter_enabled', False):
+                bias_correction = calibration_info.get('mean_bias_correction', 'N/A')
+                info_text += f"Bias Correction: {bias_correction}\n"
+        
+        # Add ground truth availability
+        ground_truth_available = bayesian_results.get('ground_truth_available', False)
+        info_text += f"\nGround Truth: {'Available' if ground_truth_available else 'Not Available'}"
+        
+        # Position the text box
+        self.ax.text(0.02, 0.98, info_text, transform=self.ax.transAxes, 
+                    fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    def _format_plot(self, observation, log_scale):
+        """Apply final formatting to the plot."""
+        self.ax.set_title("Bayesian Pipeline Results")
+        
+        # Set appropriate labels
+        if observation and observation.has_wavelengths():
+            self.ax.set_xlabel("Wavelength (μm)")
+        else:
+            self.ax.set_xlabel("Wavelength Index")
+            
+        self.ax.set_ylabel("Transit Depth")
+        self.ax.legend()
+        self.ax.grid(True, alpha=0.3)
+        
+        # Apply log scale if requested
+        if log_scale:
+            self.ax.set_yscale('log')
+    
+    def _show_ground_truth_preview(self, observation):
+        """Show ground truth preview when no Bayesian results are available."""
+        ground_truth = observation.get_ground_truth()
+        wavelengths = self._get_wavelengths(observation, len(ground_truth))
+        
+        self.ax.clear()
+        self.ax.plot(wavelengths, ground_truth, 'r-', linewidth=2, label='Ground Truth')
+        self.ax.set_title("Ground Truth Preview (No Bayesian Results)")
+        self.ax.set_xlabel("Wavelength (μm)" if observation.has_wavelengths() else "Wavelength Index")
+        self.ax.set_ylabel("Transit Depth")
+        self.ax.legend()
+        self.ax.grid(True, alpha=0.3)
+
+
+class CovariancePlotter:
+    """Handles plotting of covariance matrices."""
+    
+    @staticmethod
+    def plot_covariance(covariance, title="Covariance Matrix"):
+        """Plot covariance matrix in a separate window."""
+        try:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            im = ax.imshow(covariance, cmap='viridis', aspect='auto')
+            ax.set_title(title)
+            ax.set_xlabel('Wavelength Index')
+            ax.set_ylabel('Wavelength Index')
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label('Covariance')
+            fig.tight_layout()
+            fig.show()
+        except Exception as e:
+            print(f"Warning: Could not display covariance matrix: {e}")
 
 
 class DataLoadingWorker(QThread):
@@ -165,6 +417,60 @@ class BayesianPipelineWorker(QThread):
                 time, flux, transit_mask, batch_size=self.pipeline_params.get('batch_size', 20)
             )
             
+            # Handle calibration based on mode
+            calibration_mode = self.pipeline_params.get('calibration_mode', 'Training')
+            calibration_file = self.pipeline_params.get('calibration_file')
+            print(f"DEBUG: Calibration mode: {calibration_mode}")
+            if calibration_mode == 'Disabled':
+                self.progress_signal.emit("Calibration disabled - using uncalibrated predictions")
+            elif calibration_mode == 'Training':
+                # Training mode: train calibration models if ground truth available
+                if self.observation.has_ground_truth():
+                    ground_truth = self.observation.get_ground_truth()
+                    self.progress_signal.emit("Training calibration models on training data...")
+                    
+                    # Train calibration models
+                    pipeline.train_calibration_models(predictions, uncertainties, ground_truth)
+                    
+                    # Save calibration models
+                    if calibration_file:
+                        save_file = calibration_file
+                    else:
+                        save_file = f"calibration_models_{self.observation.planet_id}_{self.observation.instrument}.json"
+                    
+                    pipeline.save_calibration_models(save_file)
+                    self.progress_signal.emit(f"Calibration models saved to {save_file}")
+                    
+                    # Apply calibration
+                    predictions, uncertainties, covariance = pipeline._calibrate_models(
+                        predictions, uncertainties, covariance, ground_truth
+                    )
+                else:
+                    self.progress_signal.emit("No ground truth available for training - using uncalibrated predictions")
+            elif calibration_mode == 'Inference':
+                # Inference mode: load and apply pre-trained calibration models
+                if calibration_file:
+                    try:
+                        pipeline.load_calibration_models(calibration_file)
+                        self.progress_signal.emit(f"Loaded calibration models from {calibration_file}")
+                    except FileNotFoundError:
+                        self.progress_signal.emit(f"Calibration file {calibration_file} not found - using default values")
+                        pipeline.set_default_calibration_values()
+                else:
+                    # Try to load auto-generated calibration file
+                    auto_file = f"calibration_models_{self.observation.planet_id}_{self.observation.instrument}.json"
+                    try:
+                        pipeline.load_calibration_models(auto_file)
+                        self.progress_signal.emit(f"Loaded calibration models from {auto_file}")
+                    except FileNotFoundError:
+                        self.progress_signal.emit("No calibration file found - using default values")
+                        pipeline.set_default_calibration_values()
+                print("DEBUG: Applying calibration...")
+                # Apply calibration
+                predictions, uncertainties, covariance = pipeline._calibrate_models(
+                    predictions, uncertainties, covariance
+                )
+            
             # Store results (but don't store the pipeline object to avoid state persistence)
             results = {
                 'predictions': predictions,
@@ -177,9 +483,10 @@ class BayesianPipelineWorker(QThread):
                 # Store fitted components for Component Analysis tab
                 'fitted_components': pipeline.fitted_components.copy(),
                 'mcmc_samples': pipeline.get_mcmc_samples(),
-                'backend_info': pipeline.get_backend_info()
+                'backend_info': pipeline.get_backend_info(),
+                'calibration_info': pipeline.get_calibration_info(),
+                'ground_truth_available': self.observation.has_ground_truth()
             }
-            
             # Clean up pipeline object to prevent state persistence
             del pipeline
             
@@ -372,6 +679,32 @@ class DataInspector(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        
+        # Enable keyboard focus and events
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
+        # --- Initialize Data ---
+        self.dataset_dir = Path("dataset")
+        self.axis_info_df = None
+        self.star_info_df = None
+        self.observation = None
+        self.bayesian_results = None  # Store Bayesian pipeline results
+        
+        # Track current backend and instrument to prevent crashes
+        self.current_backend = None  # Track which backend the data is loaded for
+        self.current_instrument = None  # Track which instrument the data is loaded for
+        self.navigation_locked = False  # Track which panel is locked
+        
+        # Tab indices for dynamic visibility management
+        self.tab_indices = {}
+        
+        # Current planet tracking
+        self.current_planet_id = None
+        
+        # Keyboard navigation settings
+        self.keyboard_step_normal = 1  # Normal step size
+        self.keyboard_step_fine = 1    # Fine step size (same as normal for combo boxes)
+        
         self.setWindowTitle("Ariel Data Inspector")
         self.setGeometry(100, 100, 1600, 900)
         
@@ -418,56 +751,98 @@ class DataInspector(QMainWindow):
         # Since "Preprocessing Pipeline" is selected by default (index 0), 
         # we need to explicitly call the change handler to set the correct tab
         self.on_pipeline_mode_change("Preprocessing Pipeline")
+        
+        # Show keyboard shortcuts help in status bar
+        self.statusBar().showMessage(
+            "Keyboard Navigation: ←→ Planet | ↑↓ Observation | Shift+←→ Split | Shift+↑↓ Instrument | Alt+←→ Backend | Ctrl for fine control", 
+            10000
+        )
 
     # --- UI Creation Methods (Broken down for clarity) ---
 
     def _create_bayesian_settings_group(self):
-        bayesian_group = QGroupBox("Bayesian Pipeline Parameters")
+        """Create the Bayesian pipeline settings group."""
+        group = QGroupBox("Bayesian Pipeline Settings")
         layout = QVBoxLayout()
-        # PCA components
+        
+        # PCA Components
         pca_layout = QHBoxLayout()
         pca_layout.addWidget(QLabel("PCA Components:"))
         self.bayesian_pca_spinbox = QSpinBox()
-        self.bayesian_pca_spinbox.setRange(0, 5)
+        self.bayesian_pca_spinbox.setRange(0, 10)
         self.bayesian_pca_spinbox.setValue(1)
         pca_layout.addWidget(self.bayesian_pca_spinbox)
         layout.addLayout(pca_layout)
+        
         # Iterations
         iter_layout = QHBoxLayout()
         iter_layout.addWidget(QLabel("Iterations:"))
         self.bayesian_iter_spinbox = QSpinBox()
-        self.bayesian_iter_spinbox.setRange(1, 20)
+        self.bayesian_iter_spinbox.setRange(1, 50)
         self.bayesian_iter_spinbox.setValue(7)
         iter_layout.addWidget(self.bayesian_iter_spinbox)
         layout.addLayout(iter_layout)
+        
         # Samples
         samples_layout = QHBoxLayout()
-        samples_layout.addWidget(QLabel("Samples:"))
+        samples_layout.addWidget(QLabel("MCMC Samples:"))
         self.bayesian_samples_spinbox = QSpinBox()
         self.bayesian_samples_spinbox.setRange(10, 1000)
         self.bayesian_samples_spinbox.setValue(100)
         samples_layout.addWidget(self.bayesian_samples_spinbox)
         layout.addLayout(samples_layout)
-        # Batch size for MCMC
+        
+        # Batch Size
         batch_layout = QHBoxLayout()
-        batch_layout.addWidget(QLabel("MCMC Batch Size:"))
+        batch_layout.addWidget(QLabel("Batch Size:"))
         self.bayesian_batch_spinbox = QSpinBox()
-        self.bayesian_batch_spinbox.setRange(5, 50)
+        self.bayesian_batch_spinbox.setRange(1, 100)
         self.bayesian_batch_spinbox.setValue(20)
-        self.bayesian_batch_spinbox.setToolTip("Number of MCMC samples to process at once. Higher values are faster but use more GPU memory.")
         batch_layout.addWidget(self.bayesian_batch_spinbox)
         layout.addLayout(batch_layout)
-        # Drift batch size
+        
+        # Drift Batch Size
         drift_batch_layout = QHBoxLayout()
         drift_batch_layout.addWidget(QLabel("Drift Batch Size:"))
         self.drift_batch_spinbox = QSpinBox()
-        self.drift_batch_spinbox.setRange(1, 64)
+        self.drift_batch_spinbox.setRange(1, 20)
         self.drift_batch_spinbox.setValue(8)
-        self.drift_batch_spinbox.setToolTip("Number of wavelengths to process at once in the drift step. Higher values are faster but use more GPU memory.")
         drift_batch_layout.addWidget(self.drift_batch_spinbox)
         layout.addLayout(drift_batch_layout)
-        bayesian_group.setLayout(layout)
-        return bayesian_group
+        
+        # Calibration Settings
+        calibration_group = QGroupBox("Calibration Settings")
+        calibration_layout = QVBoxLayout()
+        
+        # Calibration Mode
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Calibration Mode:"))
+        self.calibration_mode_combo = QComboBox()
+        self.calibration_mode_combo.addItems(["Training", "Inference", "Disabled"])
+        self.calibration_mode_combo.setCurrentText("Inference")
+        mode_layout.addWidget(self.calibration_mode_combo)
+        calibration_layout.addLayout(mode_layout)
+        
+        # Calibration File
+        file_layout = QHBoxLayout()
+        file_layout.addWidget(QLabel("Calibration File:"))
+        self.calibration_file_edit = QLineEdit()
+        self.calibration_file_edit.setPlaceholderText("Leave empty for auto-generated filename")
+        file_layout.addWidget(self.calibration_file_edit)
+        calibration_group.setLayout(calibration_layout)
+        layout.addWidget(calibration_group)
+        
+        # Calibration Options
+        self.apply_sigma_fudger = QCheckBox("Apply SigmaFudger")
+        self.apply_sigma_fudger.setChecked(True)
+        layout.addWidget(self.apply_sigma_fudger)
+        
+        self.apply_mean_bias_fitter = QCheckBox("Apply MeanBiasFitter")
+        self.apply_mean_bias_fitter.setChecked(True)
+        layout.addWidget(self.apply_mean_bias_fitter)
+        
+        group.setLayout(layout)
+        return group
 
     def _create_controls_panel(self):
         """Creates the right-hand panel with all user controls."""
@@ -509,43 +884,47 @@ class DataInspector(QMainWindow):
 
     def _create_navigation_group(self):
         nav_group = QGroupBox("Navigation")
-        layout = QVBoxLayout()
+        nav_layout = QFormLayout()
 
+        # Split selection
         self.split_combo = QComboBox()
+        self.split_combo.setObjectName("Split")
         self.split_combo.addItems(["train", "test"])
         self.split_combo.currentTextChanged.connect(self.populate_planet_ids)
+        nav_layout.addRow("Split:", self.split_combo)
 
+        # Planet selection
         self.planet_combo = QComboBox()
+        self.planet_combo.setObjectName("Planet")
         self.planet_combo.setEditable(True)
         self.planet_combo.currentTextChanged.connect(self.populate_obs_ids)
+        nav_layout.addRow("Planet:", self.planet_combo)
 
+        # Observation selection
         self.obs_combo = QComboBox()
+        self.obs_combo.setObjectName("Observation")
+        nav_layout.addRow("Observation:", self.obs_combo)
 
+        # Instrument selection
         self.instrument_combo = QComboBox()
+        self.instrument_combo.setObjectName("Instrument")
         self.instrument_combo.addItems(["AIRS-CH0", "FGS1"])
         self.instrument_combo.currentTextChanged.connect(self.populate_obs_ids)
-        # Remove: self.instrument_combo.currentTextChanged.connect(self.update_detrending_options)
-        
+        nav_layout.addRow("Instrument:", self.instrument_combo)
+
+        # Backend selection
         self.backend_combo = QComboBox()
+        self.backend_combo.setObjectName("Backend")
         self.backend_combo.addItems(["cpu", "gpu"])
         if not GPU_ENABLED:
             self.backend_combo.model().item(1).setEnabled(False)
-        # Remove: self.backend_combo.currentTextChanged.connect(self.update_detrending_options)
+        nav_layout.addRow("Backend:", self.backend_combo)
 
-        self.load_button = QPushButton("Load Planet Data")
+        self.load_button = QPushButton("Load Data")
         self.load_button.clicked.connect(self.load_data)
+        nav_layout.addRow("", self.load_button)
 
-        # Add widgets with labels
-        for label, widget in [
-            ("Dataset Split:", self.split_combo), ("Planet ID:", self.planet_combo),
-            ("Observation ID:", self.obs_combo), ("Instrument:", self.instrument_combo),
-            ("Processing Backend:", self.backend_combo)
-        ]:
-            layout.addWidget(QLabel(label))
-            layout.addWidget(widget)
-        layout.addWidget(self.load_button)
-
-        nav_group.setLayout(layout)
+        nav_group.setLayout(nav_layout)
         return nav_group
 
     def _create_calibration_group(self):
@@ -871,6 +1250,9 @@ class DataInspector(QMainWindow):
         self.components_ax = self.components_canvas.figure.subplots(2, 3)  # 2x3 grid for components
         self.components_ax = self.components_ax.flatten()  # Flatten for easier indexing
         
+        # Initialize plotters
+        self.bayesian_plotter = BayesianPlotter(self.bayesian_ax, self.bayesian_canvas)
+        
         self.image_cbar = None
 
         # Store tab indices for dynamic visibility management
@@ -967,6 +1349,7 @@ class DataInspector(QMainWindow):
 
     def _create_detector_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); info_group = QGroupBox("Star & Planet Info"); info_layout = QVBoxLayout(info_group); self.info_display = QTextEdit(); self.info_display.setReadOnly(True); info_group.setFixedHeight(150); info_layout.addWidget(self.info_display); layout.addWidget(info_group); layout.addWidget(self.image_canvas); self.image_canvas.mpl_connect('motion_notify_event', self.on_mouse_move); return tab
+    
     def _create_detrended_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); self.zoom_checkbox = QCheckBox("Zoom to Transit"); self.zoom_checkbox.toggled.connect(self.update_detrended_plot); layout.addWidget(self.zoom_checkbox); layout.addWidget(self.detrended_lc_canvas); return tab
 
@@ -1496,8 +1879,19 @@ class DataInspector(QMainWindow):
         if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
             self.update_bayesian_plot()
             self.update_components_plot()
+    
     def update_image_plot(self):
-        if not (self.observation and self.observation.is_loaded): return
+        if not (self.observation and self.observation.is_loaded): 
+            print("DEBUG: update_image_plot - observation not loaded")
+            return
+        
+        # Debug: Check observation state
+        print(f"DEBUG: update_image_plot - observation.is_loaded: {self.observation.is_loaded}")
+        print(f"DEBUG: update_image_plot - processed_signal is None: {self.observation.processed_signal is None}")
+        if self.observation.processed_signal is not None:
+            print(f"DEBUG: update_image_plot - processed_signal shape: {self.observation.processed_signal.shape}")
+            print(f"DEBUG: update_image_plot - processed_signal type: {type(self.observation.processed_signal)}")
+        
         # Safely remove the previous colorbar if it exists and is still in the figure
         if self.image_cbar is not None:
             try:
@@ -1506,11 +1900,31 @@ class DataInspector(QMainWindow):
             except Exception as e:
                 print(f"Warning: Could not remove image colorbar: {e}")
             self.image_cbar = None
+        
         self.image_ax.clear()
-        processed_signal = self.observation.get_data(return_type='numpy'); frame_idx = self.frame_slider.value()
-        if self.calib_checkboxes["cds"].isChecked(): frame_idx //= 2
-        if frame_idx >= processed_signal.shape[0]: frame_idx = 0
+        
+        # Get processed signal with explicit conversion
+        processed_signal = self.observation.get_data(return_type='numpy')
+        print(f"DEBUG: update_image_plot - after get_data, type: {type(processed_signal)}")
+        print(f"DEBUG: update_image_plot - after get_data, shape: {processed_signal.shape if processed_signal is not None else 'None'}")
+        
+        if processed_signal is None:
+            print("DEBUG: update_image_plot - processed_signal is None after get_data")
+            self.image_ax.set_title("No Data Available")
+            self.image_canvas.draw()
+            return
+        
+        frame_idx = self.frame_slider.value()
+        if self.calib_checkboxes["cds"].isChecked(): 
+            frame_idx //= 2
+        
+        if frame_idx >= processed_signal.shape[0]: 
+            frame_idx = 0
+        
         img_data = processed_signal[frame_idx]
+        print(f"DEBUG: update_image_plot - img_data shape: {img_data.shape}")
+        print(f"DEBUG: update_image_plot - img_data min/max: {img_data.min()}/{img_data.max()}")
+        
         try:
             im = self.image_ax.imshow(img_data, aspect='auto', cmap='viridis', origin='lower')
             self.image_cbar = self.image_canvas.figure.colorbar(im, ax=self.image_ax)
@@ -1521,30 +1935,116 @@ class DataInspector(QMainWindow):
             im = self.image_ax.imshow(img_data, aspect='auto', cmap='viridis', origin='lower')
             self.image_ax.set_title(f"Detector Frame (Index: {frame_idx})")
             self.image_canvas.draw()
+    
     def update_light_curve_plots(self):
         if not (self.observation and self.observation.is_loaded): return
         self.update_photometry_plot(); self.update_detrended_plot(); self.update_phase_folded_plot()
+    
     def update_photometry_plot(self):
         self.single_lc_ax.clear()
-        if self.observation.light_curves is None: self.single_lc_canvas.draw(); return
-        light_curves = self.observation.get_light_curves(return_type='numpy'); wavelength_col = self.wavelength_slider.value()
-        if wavelength_col >= light_curves.shape[1]: wavelength_col = 0
-        self.single_lc_ax.plot(self.observation.get_time_array(), light_curves[:, wavelength_col], '.-', alpha=0.8, color='dodgerblue'); self.single_lc_ax.set_title(f"Raw Light Curve (Wavelength: {wavelength_col})"); self.single_lc_ax.set_xlabel("Time (days)"); self.single_lc_ax.set_ylabel("Flux"); self.single_lc_ax.grid(True, alpha=0.3); self.single_lc_canvas.draw()
+        if self.observation.light_curves is None: 
+            self.single_lc_canvas.draw()
+            return
+        light_curves = self.observation.get_light_curves(return_type='numpy')
+        config_wavelength_col = self.wavelength_slider.value()
+        wavelength_col = self._convert_wavelength_index(config_wavelength_col, light_curves.shape[1])
+        
+        self.single_lc_ax.plot(self.observation.get_time_array(), light_curves[:, wavelength_col], '.-', alpha=0.8, color='dodgerblue')
+        self.single_lc_ax.set_title(f"Raw Light Curve (Wavelength: {config_wavelength_col})")
+        self.single_lc_ax.set_xlabel("Time (days)")
+        self.single_lc_ax.set_ylabel("Flux")
+        self.single_lc_ax.grid(True, alpha=0.3)
+        self.single_lc_canvas.draw()
+    
     def update_detrended_plot(self):
         self.detrended_lc_ax.clear()
-        if self.observation.detrended_light_curves is None: self.detrended_lc_canvas.draw(); return
-        detrended_lcs = self.observation.get_detrended_light_curves(return_type='numpy'); original_lcs = self.observation.get_light_curves(return_type='numpy'); noise_models = self.observation.get_noise_models(return_type='numpy'); wavelength_col = self.wavelength_slider.value()
-        if wavelength_col >= detrended_lcs.shape[1]: wavelength_col = 0
+        if self.observation.detrended_light_curves is None: 
+            self.detrended_lc_canvas.draw()
+            return
+        detrended_lcs = self.observation.get_detrended_light_curves(return_type='numpy')
+        original_lcs = self.observation.get_light_curves(return_type='numpy')
+        noise_models = self.observation.get_noise_models(return_type='numpy')
+        config_wavelength_col = self.wavelength_slider.value()
+        wavelength_col = self._convert_wavelength_index(config_wavelength_col, detrended_lcs.shape[1])
+        
         time_arr = self.observation.get_time_array()
-        if self.zoom_checkbox.isChecked(): self.detrended_lc_ax.plot(time_arr, detrended_lcs[:, wavelength_col], '.', color='black')
-        else: self.detrended_lc_ax.plot(time_arr, original_lcs[:, wavelength_col], '.', color='grey', alpha=0.2, label='Original'); self.detrended_lc_ax.plot(time_arr, noise_models[:, wavelength_col], '-', color='red', label='Noise Model'); self.detrended_lc_ax.plot(time_arr, detrended_lcs[:, wavelength_col], '.', color='black', alpha=0.8, label='Detrended'); self.detrended_lc_ax.legend()
-        self.detrended_lc_ax.set_title(f"Detrended Light Curve (Wavelength: {wavelength_col})"); self.detrended_lc_ax.set_xlabel("Time (days)"); self.detrended_lc_ax.set_ylabel("Normalized Flux"); self.detrended_lc_ax.grid(True, alpha=0.3); self.detrended_lc_canvas.draw()
+        if self.zoom_checkbox.isChecked():
+            self.detrended_lc_ax.plot(time_arr, detrended_lcs[:, wavelength_col], '.', color='black')
+        else:
+            self.detrended_lc_ax.plot(time_arr, original_lcs[:, wavelength_col], '.', color='grey', alpha=0.2, label='Original')
+            self.detrended_lc_ax.plot(time_arr, noise_models[:, wavelength_col], '-', color='red', label='Noise Model')
+            self.detrended_lc_ax.plot(time_arr, detrended_lcs[:, wavelength_col], '.', color='black', alpha=0.8, label='Detrended')
+            self.detrended_lc_ax.legend()
+        
+        self.detrended_lc_ax.set_title(f"Detrended Light Curve (Wavelength: {config_wavelength_col})")
+        self.detrended_lc_ax.set_xlabel("Time (days)")
+        self.detrended_lc_ax.set_ylabel("Normalized Flux")
+        self.detrended_lc_ax.grid(True, alpha=0.3)
+        self.detrended_lc_canvas.draw()
+    
     def update_phase_folded_plot(self):
+        """Update the phase-folded plot with static scale based on overall data range."""
         self.phase_folded_ax.clear()
-        if self.observation.phase_folded_lc is None: self.phase_folded_canvas.draw(); return
-        folded_data = self.observation.get_phase_folded_lc(); wavelength_col = self.wavelength_slider.value()
-        if wavelength_col >= len(folded_data): wavelength_col = 0
-        bin_centers, binned_flux, binned_error = folded_data[wavelength_col]; self.phase_folded_ax.errorbar(bin_centers, binned_flux, yerr=binned_error, fmt='o', color='black', ecolor='gray', elinewidth=1, capsize=2); self.phase_folded_ax.axhline(1.0, color='r', linestyle='--', alpha=0.7); self.phase_folded_ax.set_title(f"Phase-Folded Transit (Wavelength: {wavelength_col})"); self.phase_folded_ax.set_xlabel("Orbital Phase"); self.phase_folded_ax.set_ylabel("Normalized Flux"); self.phase_folded_ax.grid(True, alpha=0.3); self.phase_folded_canvas.draw()
+        
+        if self.observation.phase_folded_lc is None:
+            self.phase_folded_canvas.draw()
+            return
+            
+        folded_data = self.observation.get_phase_folded_lc()
+        config_wavelength_col = self.wavelength_slider.value()
+        wavelength_col = self._convert_wavelength_index(config_wavelength_col, len(folded_data))
+            
+        bin_centers, binned_flux, binned_error = folded_data[wavelength_col]
+        
+        # Calculate overall data range from all wavelengths for static scale
+        all_flux_values = []
+        all_error_values = []
+        
+        for wl_idx in range(len(folded_data)):
+            try:
+                _, flux, error = folded_data[wl_idx]
+                all_flux_values.extend(flux)
+                all_error_values.extend(error)
+            except (IndexError, ValueError):
+                continue
+        
+        # Convert to numpy arrays for easier calculation
+        all_flux_values = np.array(all_flux_values)
+        all_error_values = np.array(all_error_values)
+        
+        # Calculate overall range with padding
+        if len(all_flux_values) > 0:
+            flux_min = np.min(all_flux_values)
+            flux_max = np.max(all_flux_values)
+            flux_range = flux_max - flux_min
+            
+            # Add padding to the range (10% on each side)
+            padding = flux_range * 0.1
+            y_min = flux_min - padding
+            y_max = flux_max + padding
+            
+            # Ensure we don't go below 0 for normalized flux
+            y_min = max(y_min, 0.0)
+            
+            # Set static y-axis limits
+            self.phase_folded_ax.set_ylim(y_min, y_max)
+        
+        # Plot the current wavelength data
+        self.phase_folded_ax.errorbar(bin_centers, binned_flux, yerr=binned_error, 
+                                    fmt='o', color='black', ecolor='gray', 
+                                    elinewidth=1, capsize=2)
+        
+        # Add reference line at 1.0
+        self.phase_folded_ax.axhline(1.0, color='r', linestyle='--', alpha=0.7)
+        
+        # Format the plot
+        self.phase_folded_ax.set_title(f"Phase-Folded Transit (Wavelength: {config_wavelength_col})")
+        self.phase_folded_ax.set_xlabel("Orbital Phase")
+        self.phase_folded_ax.set_ylabel("Normalized Flux")
+        self.phase_folded_ax.grid(True, alpha=0.3)
+        
+        self.phase_folded_canvas.draw()
+    
     def load_data(self):
         planet_id = self.planet_combo.currentText()
         obs_id = self.obs_combo.currentText()
@@ -1612,11 +2112,20 @@ class DataInspector(QMainWindow):
             self.wavelength_spinbox.setEnabled(not is_fgs)
             
             # Update slider ranges
-            max_wl = self.observation.raw_signal.shape[2] - 1
             self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1)
             self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
-            self.wavelength_slider.setRange(0, max_wl)
-            self.wavelength_spinbox.setRange(0, max_wl)
+            
+            # Set wavelength slider range based on config
+            start_col, end_col = self._get_wavelength_range_for_instrument(self.current_instrument)
+            if start_col == end_col == 0:
+                # Fallback to full range if not in config
+                max_wl = self.observation.raw_signal.shape[2] - 1
+                self.wavelength_slider.setRange(0, max_wl)
+                self.wavelength_spinbox.setRange(0, max_wl)
+            else:
+                # Use config range
+                self.wavelength_slider.setRange(start_col, end_col)
+                self.wavelength_spinbox.setRange(start_col, end_col)
             
             # Set UI to idle state
             self._set_ui_busy(False)
@@ -1673,6 +2182,7 @@ class DataInspector(QMainWindow):
             planet_ids = sorted([p.name for p in path.iterdir() if p.is_dir()]); self.planet_combo.addItems(planet_ids)
             if current_planet in planet_ids: self.planet_combo.setCurrentText(current_planet)
         self.populate_obs_ids()
+    
     def populate_obs_ids(self):
         self.obs_combo.clear(); planet_id = self.planet_combo.currentText()
         if not planet_id: return
@@ -1682,31 +2192,27 @@ class DataInspector(QMainWindow):
         if obs_ids: self.obs_combo.addItems(obs_ids)
         
         # Update wavelength controls based on instrument type
-        is_fgs = (self.instrument_combo.currentText() == 'FGS1')
+        current_instrument = self.instrument_combo.currentText()
+        is_fgs = (current_instrument == 'FGS1')
         self.wavelength_slider.setEnabled(not is_fgs)
         self.wavelength_spinbox.setEnabled(not is_fgs)
         
-        # Set wavelength slider values based on instrument
-        if is_fgs:
-            # FGS1: Set to 0 (only one wavelength) and disable
-            self.wavelength_slider.setRange(0, 0)
-            self.wavelength_spinbox.setRange(0, 0)
-            self.wavelength_slider.setValue(0)
-            self.wavelength_spinbox.setValue(0)
+        # Set wavelength slider values based on config
+        start_col, end_col = self._get_wavelength_range_for_instrument(current_instrument)
+        
+        if is_fgs or start_col == end_col:
+            # FGS1 or single wavelength: Set to start_col and disable
+            self.wavelength_slider.setRange(start_col, end_col)
+            self.wavelength_spinbox.setRange(start_col, end_col)
+            self.wavelength_slider.setValue(start_col)
+            self.wavelength_spinbox.setValue(start_col)
         else:
-            # AIRS-CH0: Enable and set to 0 (first wavelength)
-            if self.observation and self.observation.raw_signal is not None:
-                max_wl = self.observation.raw_signal.shape[2] - 1
-                self.wavelength_slider.setRange(0, max_wl)
-                self.wavelength_spinbox.setRange(0, max_wl)
-                self.wavelength_slider.setValue(0)
-                self.wavelength_spinbox.setValue(0)
-            else:
-                # No data loaded yet, just set a reasonable default range
-                self.wavelength_slider.setRange(0, 100)
-                self.wavelength_spinbox.setRange(0, 100)
-                self.wavelength_slider.setValue(0)
-                self.wavelength_spinbox.setValue(0)
+            # Multi-wavelength instrument: Enable and set to start_col
+            self.wavelength_slider.setRange(start_col, end_col)
+            self.wavelength_spinbox.setRange(start_col, end_col)
+            self.wavelength_slider.setValue(start_col)
+            self.wavelength_spinbox.setValue(start_col)
+    
     def update_detrending_options(self):
         """Update the detrending dropdown based on the loaded backend and instrument."""
         # Use the actual loaded data, not the dropdown selections
@@ -1820,7 +2326,13 @@ class DataInspector(QMainWindow):
             
             # Show ground truth data immediately when Bayesian pipeline is selected
             if self.observation and self.observation.is_loaded:
-                self.show_ground_truth_preview()
+                self.bayesian_plotter.plot_results(
+                    bayesian_results=None,
+                    observation=self.observation,
+                    show_uncertainties=False,
+                    show_ground_truth=True,
+                    log_scale=False
+                )
             
             # Update Bayesian plots if results are available
             if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
@@ -1862,7 +2374,11 @@ class DataInspector(QMainWindow):
             'n_iter': self.bayesian_iter_spinbox.value(),
             'n_samples': self.bayesian_samples_spinbox.value(),
             'batch_size': self.bayesian_batch_spinbox.value(),
-            'drift_batch_size': self.drift_batch_spinbox.value()
+            'drift_batch_size': self.drift_batch_spinbox.value(),
+            'apply_sigma_fudger': self.apply_sigma_fudger.isChecked(),
+            'apply_mean_bias_fitter': self.apply_mean_bias_fitter.isChecked(),
+            'calibration_mode': self.calibration_mode_combo.currentText(),
+            'calibration_file': self.calibration_file_edit.text().strip() if self.calibration_file_edit.text().strip() else None
         }
         
         # Automatically reduce batch sizes for FGS to prevent OOM
@@ -2077,246 +2593,58 @@ class DataInspector(QMainWindow):
         else:
             return "unknown"
     
-    def show_ground_truth_preview(self):
-        """
-        Show ground truth data immediately when a pipeline is selected.
-        This provides immediate feedback about what the user is working with.
-        """
-        if not self.observation or not self.observation.has_ground_truth():
-            return
-            
-        # Clear the Bayesian plot and show ground truth preview
-        self.bayesian_ax.clear()
-        
-        ground_truth = self.observation.get_ground_truth()
-        
-        # Use actual wavelengths if available, otherwise use indices
-        if self.observation.has_wavelengths():
-            wavelengths = self.observation.get_wavelengths()
-            # Ensure we have the same number of wavelengths as ground truth
-            if len(wavelengths) >= len(ground_truth):
-                wavelengths = wavelengths[:len(ground_truth)]
-            else:
-                # Fallback to indices if wavelength count doesn't match
-                wavelengths = np.arange(len(ground_truth))
+    def _get_wavelength_range_for_instrument(self, instrument):
+        """Get the wavelength range for the given instrument from config."""
+        if instrument in WAVELENGTH_RANGES:
+            start_col, end_col = WAVELENGTH_RANGES[instrument]
+            return start_col, end_col
         else:
-            wavelengths = np.arange(len(ground_truth))
-        
-        # Plot ground truth with better visibility
-        self.bayesian_ax.plot(wavelengths, ground_truth, 'r-', linewidth=3, alpha=0.9, label='Ground Truth')
-        
-        # Add information about the data
-        info_text = f"Ground Truth Preview\n"
-        info_text += f"Planet ID: {self.observation.planet_id}\n"
-        info_text += f"Number of wavelengths: {len(ground_truth)}\n"
-        info_text += f"Transit depth range: {ground_truth.min():.4f}-{ground_truth.max():.4f}\n"
-        
-        # Add wavelength info if available
-        if self.observation.has_wavelengths():
-            info_text += f"Wavelength range: {wavelengths.min():.2f}-{wavelengths.max():.2f} μm"
-        else:
-            info_text += f"Wavelength indices: 0-{len(ground_truth)-1}"
-        
-        # Add info text to plot
-        self.bayesian_ax.text(0.02, 0.98, info_text, transform=self.bayesian_ax.transAxes, 
-                            verticalalignment='top', fontsize=10, 
-                            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-        
-        # Format the plot
-        self.bayesian_ax.set_title("Ground Truth Preview")
-        if self.observation.has_wavelengths():
-            self.bayesian_ax.set_xlabel("Wavelength (μm)")
-        else:
-            self.bayesian_ax.set_xlabel("Wavelength Index")
-        self.bayesian_ax.set_ylabel("Transit Depth")
-        self.bayesian_ax.legend()
-        self.bayesian_ax.grid(True, alpha=0.3)
-        
-        self.bayesian_canvas.draw()
+            # Fallback: return full range if instrument not found in config
+            return 0, 0  # Will be updated with actual data range
     
-    def calculate_ground_truth_metrics(self, predictions, ground_truth=None):
-        """Calculate metrics between predictions and ground truth."""
-        if ground_truth is None:
-            # Legacy mode: extract ground truth from observation
-            if not self.observation or not self.observation.has_ground_truth():
-                return None
-            ground_truth = self.observation.get_ground_truth()
-        
-        # Ensure both arrays have the same length
-        min_length = min(len(predictions), len(ground_truth))
-        predictions = predictions[:min_length]
-        ground_truth = ground_truth[:min_length]
-        
-        # Remove any NaN values
-        valid_mask = np.isfinite(predictions) & np.isfinite(ground_truth)
-        if not np.any(valid_mask):
-            return None
+    def _convert_wavelength_index(self, config_index, data_shape):
+        """Convert config-based wavelength index to actual data index."""
+        if not hasattr(self, 'current_instrument'):
+            return config_index
             
-        predictions_clean = predictions[valid_mask]
-        ground_truth_clean = ground_truth[valid_mask]
+        start_col, end_col = self._get_wavelength_range_for_instrument(self.current_instrument)
         
-        if len(predictions_clean) == 0:
-            return None
-        
-        # Calculate metrics
-        rms_error = np.sqrt(np.mean((predictions_clean - ground_truth_clean) ** 2))
-        mae = np.mean(np.abs(predictions_clean - ground_truth_clean))
-        
-        # Calculate correlation coefficient (R²)
-        correlation = np.corrcoef(predictions_clean, ground_truth_clean)[0, 1]
-        if np.isnan(correlation):
-            correlation = 0.0
-        
-        return {
-            'rms_error': rms_error,
-            'mae': mae,
-            'correlation': correlation,
-            'ground_truth': ground_truth_clean,
-            'predictions': predictions_clean
-        }
+        if self.current_instrument == 'AIRS-CH0' and start_col != end_col:
+            # For AIRS-CH0, convert from config range (39-321) to data index (0-based)
+            relative_index = config_index - start_col
+            if relative_index < 0 or relative_index >= data_shape:
+                relative_index = 0
+            return relative_index
+        else:
+            # For other instruments or single wavelength, use the index directly
+            if config_index >= data_shape:
+                return 0
+            return config_index
+    
+
 
     def update_bayesian_plot(self):
-        """Update the Bayesian results plot."""
-        if not hasattr(self, 'bayesian_results') or self.bayesian_results is None:
-            # Show ground truth preview if available, otherwise show "no results" message
-            if self.observation and self.observation.has_ground_truth():
-                self.show_ground_truth_preview()
-            else:
-                # Clear the plot if no results and no ground truth
-                self.bayesian_ax.clear()
-                self.bayesian_ax.set_title("No Bayesian Results Available")
-                
-                # Use appropriate x-axis label based on whether we have wavelength data
-                if self.observation and self.observation.has_wavelengths():
-                    self.bayesian_ax.set_xlabel("Wavelength (μm)")
-                else:
-                    self.bayesian_ax.set_xlabel("Wavelength Index")
-                    
-                self.bayesian_ax.set_ylabel("Transit Depth")
-                self.bayesian_canvas.draw()
-            return
+        """Update the Bayesian results plot using the new plotter."""
+        # Get checkbox states
+        show_uncertainties = self.show_uncertainties_checkbox.isChecked()
+        show_ground_truth = self.show_ground_truth_checkbox.isChecked()
+        log_scale = self.log_scale_checkbox.isChecked()
         
-        # Clear the plot
-        self.bayesian_ax.clear()
+        # Use the Bayesian plotter to handle the visualization
+        self.bayesian_plotter.plot_results(
+            bayesian_results=getattr(self, 'bayesian_results', None),
+            observation=self.observation,
+            show_uncertainties=show_uncertainties,
+            show_ground_truth=show_ground_truth,
+            log_scale=log_scale
+        )
         
-        # Get results
-        predictions = self.bayesian_results['predictions']
-        uncertainties = self.bayesian_results['uncertainties']
-        covariance = self.bayesian_results['covariance']
-        
-        # Create wavelength array - use actual wavelengths if available
-        if self.observation and self.observation.has_wavelengths():
-            wavelengths = self.observation.get_wavelengths()
-            print(f"DEBUG: Available wavelengths: {len(wavelengths)} points, range: {wavelengths.min():.2f}-{wavelengths.max():.2f} μm")
-            print(f"DEBUG: Predictions: {len(predictions)} points")
-            
-            # Ensure we have the same number of wavelengths as predictions
-            if len(wavelengths) >= len(predictions):
-                wavelengths = wavelengths[:len(predictions)]
-                print(f"DEBUG: Using wavelengths[:{len(predictions)}] = {wavelengths.min():.2f}-{wavelengths.max():.2f} μm")
-            else:
-                # Fallback to indices if wavelength count doesn't match
-                wavelengths = np.arange(len(predictions))
-                print(f"DEBUG: Fallback to indices: 0-{len(predictions)-1}")
-        else:
-            wavelengths = np.arange(len(predictions))
-            print(f"DEBUG: No wavelength data, using indices: 0-{len(predictions)-1}")
-        
-        # Plot transit depths with transparency for better visibility
-        self.bayesian_ax.plot(wavelengths, predictions, 'b-', linewidth=2, alpha=0.8, label='Transit Depth')
-        
-        # Show uncertainties if requested
-        if self.show_uncertainties_checkbox.isChecked():
-            self.bayesian_ax.fill_between(wavelengths, 
-                                        predictions - uncertainties, 
-                                        predictions + uncertainties, 
-                                        alpha=0.3, color='blue', label='±1σ Uncertainty')
-        
-        # Show ground truth if available and requested
-        if self.observation and self.observation.has_ground_truth() and self.show_ground_truth_checkbox.isChecked():
-            ground_truth = self.observation.get_ground_truth()
-            print(f"DEBUG: Ground truth: {len(ground_truth)} points, range: {ground_truth.min():.4f}-{ground_truth.max():.4f}")
-            
-            # Use the SAME wavelength array as the predictions for proper alignment
-            # This ensures both curves are plotted on the same x-axis scale
-            if len(wavelengths) >= len(ground_truth):
-                gt_wavelengths = wavelengths[:len(ground_truth)]
-            else:
-                # If predictions have fewer points than ground truth, truncate ground truth
-                ground_truth = ground_truth[:len(wavelengths)]
-                gt_wavelengths = wavelengths
-            
-            print(f"DEBUG: Ground truth wavelengths: {len(gt_wavelengths)} points, range: {gt_wavelengths.min():.2f}-{gt_wavelengths.max():.2f} μm")
-                
-            self.bayesian_ax.plot(gt_wavelengths, ground_truth, 'r--', linewidth=3, alpha=0.9, label='Ground Truth')
-            
-            # Calculate and display metrics
-            metrics = self.calculate_ground_truth_metrics(predictions[:len(ground_truth)], ground_truth)
-            
-            # Add metrics text to plot
-            metrics_text = f"Metrics:\n"
-            metrics_text += f"RMSE: {metrics['rms_error']:.4f}\n"
-            metrics_text += f"MAE: {metrics['mae']:.4f}\n"
-            metrics_text += f"R²: {metrics['correlation']:.4f}"
-            
-            self.bayesian_ax.text(0.02, 0.02, metrics_text, transform=self.bayesian_ax.transAxes, 
-                                verticalalignment='bottom', fontsize=9, 
-                                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
-        
-        # Show covariance matrix if requested
-        if self.show_covariance_checkbox.isChecked():
-            try:
-                # Create a new figure for covariance matrix
-                fig, ax = plt.subplots(figsize=(8, 6))
-                im = ax.imshow(covariance, cmap='viridis', aspect='auto')
-                ax.set_title('Covariance Matrix')
-                ax.set_xlabel('Wavelength Index')
-                ax.set_ylabel('Wavelength Index')
-                # Store the colorbar object and set its label properly
-                cbar = fig.colorbar(im, ax=ax)
-                cbar.set_label('Covariance')
-                fig.tight_layout()
-                fig.show()
-            except Exception as e:
-                print(f"Warning: Could not display covariance matrix: {e}")
-                # Continue without showing the covariance matrix
-        
-        # Apply log scale if requested
-        if hasattr(self, 'log_scale_checkbox') and self.log_scale_checkbox.isChecked():
-            self.bayesian_ax.set_yscale('log')
-            # Set reasonable log scale limits
-            all_values = np.concatenate([predictions, ground_truth if self.observation and self.observation.has_ground_truth() else []])
-            min_val = np.min(all_values[all_values > 0])  # Avoid log(0)
-            max_val = np.max(all_values)
-            self.bayesian_ax.set_ylim(min_val * 0.5, max_val * 2)
-        
-        # Format the plot
-        self.bayesian_ax.set_title("Bayesian Pipeline Results")
-        
-        # Use appropriate x-axis label based on whether we have wavelength data
-        if self.observation and self.observation.has_wavelengths():
-            self.bayesian_ax.set_xlabel("Wavelength (μm)")
-        else:
-            self.bayesian_ax.set_xlabel("Wavelength Index")
-            
-        self.bayesian_ax.set_ylabel("Transit Depth")
-        self.bayesian_ax.legend()
-        self.bayesian_ax.grid(True, alpha=0.3)
-        
-        # Add backend info
-        if hasattr(self, 'bayesian_results') and 'pipeline_params' in self.bayesian_results:
-            pipeline_params = self.bayesian_results['pipeline_params']
-            info_text = "Backend Info:\n"
-            info_text += f"  Instrument: {pipeline_params.get('instrument', 'Unknown')}\n"
-            info_text += f"  Backend: {'gpu' if pipeline_params.get('use_gpu', False) else 'cpu'}\n"
-            info_text += f"  PCA Components: {pipeline_params.get('n_pca', 1)}\n"
-            info_text += f"  MCMC Samples: {pipeline_params.get('n_samples', 100)}\n"
-            info_text += f"  Batch Size: {pipeline_params.get('batch_size', 20)}\n"
-            self.bayesian_ax.text(0.02, 0.98, info_text, transform=self.bayesian_ax.transAxes, 
-                                verticalalignment='top', fontsize=8, 
-                                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        self.bayesian_canvas.draw()
+        # Handle covariance matrix separately if requested
+        if (hasattr(self, 'bayesian_results') and self.bayesian_results and 
+            self.show_covariance_checkbox.isChecked()):
+            covariance = self.bayesian_results.get('covariance')
+            if covariance is not None:
+                CovariancePlotter.plot_covariance(covariance)
     
     def update_components_plot(self):
         """Update the component analysis plot."""
@@ -2416,6 +2744,82 @@ class DataInspector(QMainWindow):
         
         self.components_canvas.figure.tight_layout()
         self.components_canvas.draw()
+
+    def keyPressEvent(self, event):
+        """Handle keyboard navigation events."""
+        # Only handle arrow keys
+        if event.key() not in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]:
+            super().keyPressEvent(event)
+            return
+        
+        # Check if navigation panel is locked - if so, don't allow keyboard navigation
+        if self.navigation_locked:
+            self.statusBar().showMessage("Navigation locked - click 'Change Data' to unlock", 2000)
+            super().keyPressEvent(event)
+            return
+        
+        # Determine step size based on Ctrl modifier
+        step_size = self.keyboard_step_fine if event.modifiers() & Qt.KeyboardModifier.ControlModifier else self.keyboard_step_normal
+        
+        # Check for modifier keys to navigate different combo boxes
+        shift_pressed = event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        alt_pressed = event.modifiers() & Qt.KeyboardModifier.AltModifier
+        
+        # Map arrow keys to combo box navigation
+        if event.key() == Qt.Key.Key_Left:
+            if alt_pressed:
+                self._navigate_combo_box(self.backend_combo, -step_size)
+            elif shift_pressed:
+                self._navigate_combo_box(self.split_combo, -step_size)
+            else:
+                self._navigate_combo_box(self.planet_combo, -step_size)
+        elif event.key() == Qt.Key.Key_Right:
+            if alt_pressed:
+                self._navigate_combo_box(self.backend_combo, step_size)
+            elif shift_pressed:
+                self._navigate_combo_box(self.split_combo, step_size)
+            else:
+                self._navigate_combo_box(self.planet_combo, step_size)
+        elif event.key() == Qt.Key.Key_Up:
+            if shift_pressed:
+                self._navigate_combo_box(self.instrument_combo, -step_size)
+            else:
+                self._navigate_combo_box(self.obs_combo, -step_size)
+        elif event.key() == Qt.Key.Key_Down:
+            if shift_pressed:
+                self._navigate_combo_box(self.instrument_combo, step_size)
+            else:
+                self._navigate_combo_box(self.obs_combo, step_size)
+        
+        # Don't call super() for arrow keys as we've handled them
+        
+    def _navigate_combo_box(self, combo_box, step):
+        """Navigate a combo box by the specified step amount."""
+        if not combo_box.isEnabled() or combo_box.count() == 0:
+            combo_name = combo_box.objectName() or 'combo'
+            self.statusBar().showMessage(f"{combo_name} navigation not available (disabled or empty)", 2000)
+            return
+        
+        current_index = combo_box.currentIndex()
+        new_index = current_index + step
+        
+        # Clamp to valid range
+        new_index = max(0, min(new_index, combo_box.count() - 1))
+        
+        if new_index != current_index:
+            combo_box.setCurrentIndex(new_index)
+            # Show feedback in status bar
+            ctrl_text = " (fine)" if step == self.keyboard_step_fine else ""
+            combo_name = combo_box.objectName() or 'combo'
+            self.statusBar().showMessage(
+                f"Keyboard navigation{ctrl_text}: {combo_name} → {combo_box.currentText()}", 
+                3000
+            )
+        else:
+            # At boundary, show helpful message
+            boundary = "start" if new_index == 0 else "end"
+            combo_name = combo_box.objectName() or 'combo'
+            self.statusBar().showMessage(f"{combo_name} at {boundary} of list", 1500)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

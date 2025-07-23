@@ -51,22 +51,14 @@ class TransitDepthModel:
     
     def fit(self, flux: np.ndarray, transit_mask: np.ndarray) -> np.ndarray:
         """Fit transit depth variation with improved estimation."""
-        # Handle backend conversion
-        if self.backend_name == 'gpu':
-            # For GPU, we'll compute on CPU for now (simple operation)
-            if hasattr(flux, 'get'):  # CuPy array
-                flux_cpu = flux.get()
-            elif hasattr(flux, 'cpu'):  # PyTorch tensor
-                flux_cpu = flux.cpu().numpy()
-            else:
-                flux_cpu = flux
-                
-            if hasattr(transit_mask, 'get'):  # CuPy array
-                transit_mask_cpu = transit_mask.get()
-            elif hasattr(transit_mask, 'cpu'):  # PyTorch tensor
-                transit_mask_cpu = transit_mask.cpu().numpy()
-            else:
-                transit_mask_cpu = transit_mask
+        # Convert to backend arrays
+        flux = self.xp.asarray(flux)
+        transit_mask = self.xp.asarray(transit_mask)
+        
+        # For GPU, move to CPU for optimization
+        if self.backend == 'gpu':
+            flux_cpu = flux.get() if hasattr(flux, 'get') else flux
+            transit_mask_cpu = transit_mask.get() if hasattr(transit_mask, 'get') else transit_mask
         else:
             flux_cpu = flux
             transit_mask_cpu = transit_mask
