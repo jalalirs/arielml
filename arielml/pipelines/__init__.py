@@ -2,7 +2,7 @@
 
 from .bayesian_pipeline import BayesianPipeline, create_bayesian_pipeline
 
-__all__ = [
+__all__ = [ 
     'BayesianPipeline',
     'create_bayesian_pipeline'
 ] 
