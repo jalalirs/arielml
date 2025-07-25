@@ -12,7 +12,7 @@ import numpy as np
 from typing import Tuple, Dict, Any, Optional, Callable, Union
 from scipy.optimize import minimize
 from scipy.signal import savgol_filter
-from scipy.stats import sigma_clip
+from scipy.stats import sigmaclip
 
 # Import our existing infrastructure
 from ..data.observation import DataObservation
