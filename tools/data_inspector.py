@@ -867,6 +867,69 @@ class DataInspector(QMainWindow):
         
         group.setLayout(layout)
         return group
+    
+    def _create_baseline_settings_group(self):
+        """Create the baseline pipeline settings group."""
+        group = QGroupBox("Baseline Pipeline Settings")
+        layout = QFormLayout()
+        
+        # Scale parameter
+        self.baseline_scale_spinbox = QDoubleSpinBox()
+        self.baseline_scale_spinbox.setRange(0.1, 2.0)
+        self.baseline_scale_spinbox.setValue(0.95)
+        self.baseline_scale_spinbox.setSingleStep(0.05)
+        self.baseline_scale_spinbox.setDecimals(2)
+        layout.addRow("Scale:", self.baseline_scale_spinbox)
+        
+        # Sigma parameter
+        self.baseline_sigma_spinbox = QDoubleSpinBox()
+        self.baseline_sigma_spinbox.setRange(0.0001, 0.01)
+        self.baseline_sigma_spinbox.setValue(0.0009)
+        self.baseline_sigma_spinbox.setSingleStep(0.0001)
+        self.baseline_sigma_spinbox.setDecimals(4)
+        layout.addRow("Sigma:", self.baseline_sigma_spinbox)
+        
+        # Wavelength cut parameters
+        self.baseline_cut_inf_spinbox = QSpinBox()
+        self.baseline_cut_inf_spinbox.setRange(0, 500)
+        self.baseline_cut_inf_spinbox.setValue(39)
+        layout.addRow("Cut Inf:", self.baseline_cut_inf_spinbox)
+        
+        self.baseline_cut_sup_spinbox = QSpinBox()
+        self.baseline_cut_sup_spinbox.setRange(0, 500)
+        self.baseline_cut_sup_spinbox.setValue(321)
+        layout.addRow("Cut Sup:", self.baseline_cut_sup_spinbox)
+        
+        # Binning parameter
+        self.baseline_binning_spinbox = QSpinBox()
+        self.baseline_binning_spinbox.setRange(1, 100)
+        self.baseline_binning_spinbox.setValue(30)
+        layout.addRow("Binning:", self.baseline_binning_spinbox)
+        
+        # Phase detection slice
+        self.baseline_phase_start_spinbox = QSpinBox()
+        self.baseline_phase_start_spinbox.setRange(0, 200)
+        self.baseline_phase_start_spinbox.setValue(30)
+        layout.addRow("Phase Start:", self.baseline_phase_start_spinbox)
+        
+        self.baseline_phase_end_spinbox = QSpinBox()
+        self.baseline_phase_end_spinbox.setRange(0, 200)
+        self.baseline_phase_end_spinbox.setValue(140)
+        layout.addRow("Phase End:", self.baseline_phase_end_spinbox)
+        
+        # Optimization parameters
+        self.baseline_optimization_delta_spinbox = QSpinBox()
+        self.baseline_optimization_delta_spinbox.setRange(1, 20)
+        self.baseline_optimization_delta_spinbox.setValue(7)
+        layout.addRow("Optimization Delta:", self.baseline_optimization_delta_spinbox)
+        
+        self.baseline_polynomial_degree_spinbox = QSpinBox()
+        self.baseline_polynomial_degree_spinbox.setRange(1, 10)
+        self.baseline_polynomial_degree_spinbox.setValue(3)
+        layout.addRow("Polynomial Degree:", self.baseline_polynomial_degree_spinbox)
+        
+        group.setLayout(layout)
+        return group
 
     def _create_controls_panel(self):
         """Creates the right-hand panel with all user controls."""
@@ -880,7 +943,7 @@ class DataInspector(QMainWindow):
         pipeline_mode_group = QGroupBox("Pipeline Mode")
         pipeline_mode_layout = QVBoxLayout()
         self.pipeline_mode_combo = QComboBox()
-        self.pipeline_mode_combo.addItems(["Preprocessing Pipeline", "Bayesian Pipeline"])
+        self.pipeline_mode_combo.addItems(["Preprocessing Pipeline", "Bayesian Pipeline", "Baseline Pipeline"])
         self.pipeline_mode_combo.currentTextChanged.connect(self.on_pipeline_mode_change)
         pipeline_mode_layout.addWidget(self.pipeline_mode_combo)
         pipeline_mode_group.setLayout(pipeline_mode_layout)
@@ -893,6 +956,8 @@ class DataInspector(QMainWindow):
         self.settings_tabs.addTab(self._create_analysis_group(), "Analysis")
         self.bayesian_settings_group = self._create_bayesian_settings_group()
         self.bayesian_tab_index = self.settings_tabs.addTab(self.bayesian_settings_group, "Bayesian Pipeline")
+        self.baseline_settings_group = self._create_baseline_settings_group()
+        self.baseline_tab_index = self.settings_tabs.addTab(self.baseline_settings_group, "Baseline Pipeline")
         main_layout.addWidget(self.settings_tabs)
         # --- Pipeline Execution Button ---
         self.pipeline_button = QPushButton("Apply Changes & Rerun Pipeline")
@@ -1294,6 +1359,7 @@ class DataInspector(QMainWindow):
         self.tab_indices["Bayesian Results"] = tabs.addTab(self._create_bayesian_tab(), "Bayesian Results")
         self.tab_indices["Component Analysis"] = tabs.addTab(self._create_components_tab(), "Component Analysis")
         self.tab_indices["Baseline Results"] = tabs.addTab(self._create_baseline_tab(), "Baseline Results")
+        self.tab_indices["Transit Fit"] = tabs.addTab(self._create_transit_fit_tab(), "Transit Fit")
         self.log_display = QTextEdit(); self.log_display.setReadOnly(True)
         self.tab_indices["Performance Log"] = tabs.addTab(self.log_display, "Performance Log")
         
@@ -1413,6 +1479,66 @@ class DataInspector(QMainWindow):
         
         layout.addWidget(controls_group)
         layout.addWidget(self.baseline_canvas)
+        
+        return tab
+
+    def _create_transit_fit_tab(self):
+        """Create the transit fit visualization tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Controls for transit fit visualization
+        controls_group = QGroupBox("Transit Fit Controls")
+        controls_layout = QVBoxLayout(controls_group)
+        
+        # Wavelength controls (more prominent)
+        wavelength_layout = QHBoxLayout()
+        wavelength_layout.addWidget(QLabel("Wavelength Index:"))
+        self.transit_wavelength_spinbox = QSpinBox()
+        self.transit_wavelength_spinbox.setRange(0, 282)  # 0-282 for 283 wavelengths
+        self.transit_wavelength_spinbox.setValue(0)  # Start with FGS1
+        self.transit_wavelength_spinbox.valueChanged.connect(self.update_transit_fit_plot)
+        wavelength_layout.addWidget(self.transit_wavelength_spinbox)
+        wavelength_layout.addStretch()  # Push spinbox to the left
+        controls_layout.addLayout(wavelength_layout)
+        
+        # Wavelength slider (full width for easier navigation)
+        self.transit_wavelength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.transit_wavelength_slider.setRange(0, 282)
+        self.transit_wavelength_slider.setValue(0)
+        self.transit_wavelength_slider.valueChanged.connect(self.transit_wavelength_spinbox.setValue)
+        self.transit_wavelength_spinbox.valueChanged.connect(self.transit_wavelength_slider.setValue)
+        controls_layout.addWidget(self.transit_wavelength_slider)
+        
+        # Checkboxes layout
+        checkboxes_layout = QHBoxLayout()
+        
+        # Show depth measurement checkbox
+        self.transit_show_depth_checkbox = QCheckBox("Show Depth Measurement")
+        self.transit_show_depth_checkbox.setChecked(True)
+        self.transit_show_depth_checkbox.toggled.connect(self.update_transit_fit_plot)
+        checkboxes_layout.addWidget(self.transit_show_depth_checkbox)
+        
+        # Show phases checkbox
+        self.transit_show_phases_checkbox = QCheckBox("Show Transit Phases")
+        self.transit_show_phases_checkbox.setChecked(True)
+        self.transit_show_phases_checkbox.toggled.connect(self.update_transit_fit_plot)
+        checkboxes_layout.addWidget(self.transit_show_phases_checkbox)
+        
+        # Show polynomial fit checkbox
+        self.transit_show_polynomial_checkbox = QCheckBox("Show Polynomial Fit")
+        self.transit_show_polynomial_checkbox.setChecked(True)
+        self.transit_show_polynomial_checkbox.toggled.connect(self.update_transit_fit_plot)
+        checkboxes_layout.addWidget(self.transit_show_polynomial_checkbox)
+        
+        controls_layout.addLayout(checkboxes_layout)
+        
+        layout.addWidget(controls_group)
+        
+        # Create matplotlib figure for transit fit
+        self.transit_fit_figure = Figure(figsize=(10, 6))
+        self.transit_fit_canvas = FigureCanvas(self.transit_fit_figure)
+        layout.addWidget(self.transit_fit_canvas)
         
         return tab
 
@@ -1700,6 +1826,20 @@ class DataInspector(QMainWindow):
             self._abort_loading_changes()
             self._on_loading_error("Data loading stopped by user")
     
+    def _get_observation_for_processing(self):
+        """Get the appropriate observation object for processing."""
+        if not self.observation:
+            return None
+        
+        if isinstance(self.observation, dict):
+            # For processing, use AIRS-CH0 if available, otherwise use the first one
+            if "AIRS-CH0" in self.observation:
+                return self.observation["AIRS-CH0"]
+            else:
+                return list(self.observation.values())[0]
+        else:
+            return self.observation
+    
     def _abort_pipeline_changes(self):
         """Safely abort any partial pipeline changes."""
         # Clean up GPU memory if we were using GPyTorch
@@ -1714,14 +1854,15 @@ class DataInspector(QMainWindow):
                 except ImportError:
                     pass
         
-        if self.observation and self.observation.is_loaded:
+        obs = self._get_observation_for_processing()
+        if obs and obs.is_loaded:
             # Clear any partial pipeline results
-            if hasattr(self.observation, 'detrended_light_curves'):
-                self.observation.detrended_light_curves = None
-            if hasattr(self.observation, 'noise_models'):
-                self.observation.noise_models = None
-            if hasattr(self.observation, 'phase_folded_lc'):
-                self.observation.phase_folded_lc = None
+            if hasattr(obs, 'detrended_light_curves'):
+                obs.detrended_light_curves = None
+            if hasattr(obs, 'noise_models'):
+                obs.noise_models = None
+            if hasattr(obs, 'phase_folded_lc'):
+                obs.phase_folded_lc = None
             
             # Ensure we're back to a clean state
             self._ensure_clean_state()
@@ -1737,14 +1878,15 @@ class DataInspector(QMainWindow):
     
     def _abort_detrending_changes(self):
         """Safely abort any partial detrending changes."""
-        if self.observation and self.observation.is_loaded:
+        obs = self._get_observation_for_processing()
+        if obs and obs.is_loaded:
             # Clear any partial detrending results
-            if hasattr(self.observation, 'detrended_light_curves'):
-                self.observation.detrended_light_curves = None
-            if hasattr(self.observation, 'noise_models'):
-                self.observation.noise_models = None
-            if hasattr(self.observation, 'phase_folded_lc'):
-                self.observation.phase_folded_lc = None
+            if hasattr(obs, 'detrended_light_curves'):
+                obs.detrended_light_curves = None
+            if hasattr(obs, 'noise_models'):
+                obs.noise_models = None
+            if hasattr(obs, 'phase_folded_lc'):
+                obs.phase_folded_lc = None
             
             # Ensure we're back to a clean state
             self._ensure_clean_state()
@@ -1754,23 +1896,24 @@ class DataInspector(QMainWindow):
     
     def _ensure_clean_state(self):
         """Ensure the observation is in a clean state after stopping."""
-        if self.observation and self.observation.is_loaded:
+        obs = self._get_observation_for_processing()
+        if obs and obs.is_loaded:
             # Verify that only the original data remains
             # Detrending results should be None
-            if hasattr(self.observation, 'detrended_light_curves') and self.observation.detrended_light_curves is not None:
-                self.observation.detrended_light_curves = None
+            if hasattr(obs, 'detrended_light_curves') and obs.detrended_light_curves is not None:
+                obs.detrended_light_curves = None
             
-            if hasattr(self.observation, 'noise_models') and self.observation.noise_models is not None:
-                self.observation.noise_models = None
+            if hasattr(obs, 'noise_models') and obs.noise_models is not None:
+                obs.noise_models = None
             
-            if hasattr(self.observation, 'phase_folded_lc') and self.observation.phase_folded_lc is not None:
-                self.observation.phase_folded_lc = None
+            if hasattr(obs, 'phase_folded_lc') and obs.phase_folded_lc is not None:
+                obs.phase_folded_lc = None
             
             # Ensure light curves are still available (from photometry)
-            if not hasattr(self.observation, 'light_curves') or self.observation.light_curves is None:
+            if not hasattr(obs, 'light_curves') or obs.light_curves is None:
                 # If light curves are missing, we need to re-run photometry
                 try:
-                    self.observation.run_photometry()
+                    obs.run_photometry()
                 except Exception:
                     # If photometry fails, we're in a bad state
                     pass
@@ -2506,39 +2649,54 @@ class DataInspector(QMainWindow):
         # Update tab visibility based on selected pipeline
         self.update_tab_visibility(mode)
         
+        # Determine if data is loaded
+        is_loaded = False
+        if self.observation:
+            if isinstance(self.observation, dict):
+                is_loaded = all(obs.is_loaded for obs in self.observation.values())
+            else:
+                is_loaded = self.observation.is_loaded
+        
+        # Get observation for plotting (use AIRS-CH0 if both are loaded)
+        obs_for_plot = self.observation
+        if isinstance(obs_for_plot, dict):
+            obs_for_plot = obs_for_plot.get("AIRS-CH0")
+        
         if mode == "Preprocessing Pipeline":
-            # Show detrending tab, hide Bayesian tab
+            # Show detrending tab, hide other tabs
             self.settings_tabs.setTabVisible(self.detrending_tab_index, True)
             self.settings_tabs.setTabVisible(self.bayesian_tab_index, False)
+            self.settings_tabs.setTabVisible(self.baseline_tab_index, False)
             self.pipeline_button.setText("Apply Changes & Rerun Pipeline")
-            self.pipeline_button.setEnabled(self.observation is not None)
+            self.pipeline_button.setEnabled(is_loaded)
             print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
             
             # Update preprocessing plots to ensure they're visible
-            if self.observation and self.observation.is_loaded:
+            if is_loaded and obs_for_plot:
                 self._update_all_plots()
                 
                 # Show ground truth info in status bar if available
-                if self.observation.has_ground_truth():
-                    ground_truth = self.observation.get_ground_truth()
+                if obs_for_plot.has_ground_truth():
+                    ground_truth = obs_for_plot.get_ground_truth()
                     self.statusBar().showMessage(
                         f"Ground Truth Available: {len(ground_truth)} wavelengths, "
                         f"depth range: {ground_truth.min():.4f} - {ground_truth.max():.4f}", 
                         5000
                     )
-        else:  # Bayesian Pipeline
+        elif mode == "Bayesian Pipeline":
             # Hide detrending tab, show Bayesian tab
             self.settings_tabs.setTabVisible(self.detrending_tab_index, False)
             self.settings_tabs.setTabVisible(self.bayesian_tab_index, True)
+            self.settings_tabs.setTabVisible(self.baseline_tab_index, False)
             self.pipeline_button.setText("Run Bayesian Pipeline")
-            self.pipeline_button.setEnabled(self.observation is not None and self.observation.is_loaded)
+            self.pipeline_button.setEnabled(is_loaded)
             print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
             
             # Show ground truth data immediately when Bayesian pipeline is selected
-            if self.observation and self.observation.is_loaded:
+            if is_loaded and obs_for_plot:
                 self.bayesian_plotter.plot_results(
                     bayesian_results=None,
-                    observation=self.observation,
+                    observation=obs_for_plot,
                     show_uncertainties=False,
                     show_ground_truth=True,
                     log_scale=False
@@ -2548,12 +2706,132 @@ class DataInspector(QMainWindow):
             if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
                 self.update_bayesian_plot()
                 self.update_components_plot()
+        elif mode == "Baseline Pipeline":
+            # Hide detrending and Bayesian tabs, show Baseline tab
+            self.settings_tabs.setTabVisible(self.detrending_tab_index, False)
+            self.settings_tabs.setTabVisible(self.bayesian_tab_index, False)
+            self.settings_tabs.setTabVisible(self.baseline_tab_index, True)
+            self.pipeline_button.setText("Run Baseline Pipeline")
+            self.pipeline_button.setEnabled(is_loaded)
+            print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
+            
+            # Show ground truth data immediately when Baseline pipeline is selected
+            if is_loaded and obs_for_plot:
+                self.baseline_plotter.plot_results(
+                    baseline_results=None,
+                    observation=obs_for_plot,
+                    show_uncertainties=False,
+                    show_ground_truth=True,
+                    log_scale=False
+                )
+            
+            # Update Baseline plots if results are available
+            if hasattr(self, 'baseline_results') and self.baseline_results is not None:
+                self.update_baseline_plot()
         # Force a repaint to ensure the button text is updated
         self.pipeline_button.repaint()
 
+    def run_baseline_pipeline(self):
+        """Run the baseline pipeline."""
+        # Check if data is loaded
+        is_loaded = False
+        if self.observation:
+            if isinstance(self.observation, dict):
+                is_loaded = all(obs.is_loaded for obs in self.observation.values())
+            else:
+                is_loaded = self.observation.is_loaded
+        
+        if not is_loaded:
+            self.statusBar().showMessage("Please load data first.", 5000)
+            return
+        
+        # Check backend compatibility
+        selected_backend = self.backend_combo.currentText()
+        if self.current_backend and self.current_backend != selected_backend:
+            self.statusBar().showMessage(
+                f"Backend mismatch! Data loaded on {self.current_backend}, but {selected_backend} selected. "
+                "Please reload data with the correct backend.", 10000
+            )
+            return
+        
+        # Clear previous baseline results to ensure clean state
+        if hasattr(self, 'baseline_results'):
+            self.baseline_results = None
+        
+        # Force GPU cleanup before starting
+        force_gpu_cleanup()
+        
+        # Set UI to busy state
+        self._set_ui_busy(True, "baseline_pipeline")
+        
+        # Get pipeline parameters from UI
+        pipeline_params = {
+            'instrument': self.current_instrument,
+            'use_gpu': self.current_backend == 'gpu',
+            'scale': self.baseline_scale_spinbox.value(),
+            'sigma': self.baseline_sigma_spinbox.value(),
+            'cut_inf': self.baseline_cut_inf_spinbox.value(),
+            'cut_sup': self.baseline_cut_sup_spinbox.value(),
+            'binning': self.baseline_binning_spinbox.value(),
+            'phase_detection_slice': (self.baseline_phase_start_spinbox.value(), self.baseline_phase_end_spinbox.value()),
+            'optimization_delta': self.baseline_optimization_delta_spinbox.value(),
+            'polynomial_degree': self.baseline_polynomial_degree_spinbox.value()
+        }
+        
+        # Run the baseline pipeline asynchronously
+        self._run_baseline_pipeline_async(pipeline_params)
+
+    def _run_baseline_pipeline_async(self, pipeline_params):
+        """Run the baseline pipeline asynchronously."""
+        # Create and start worker
+        self.worker = BaselinePipelineWorker(self.observation, pipeline_params)
+        self.worker.progress_signal.connect(self._on_baseline_pipeline_progress)
+        self.worker.finished_signal.connect(self._on_baseline_pipeline_finished)
+        self.worker.error_signal.connect(self._on_baseline_pipeline_error)
+        self.worker.start()
+
+    def _on_baseline_pipeline_progress(self, message: str):
+        """Handle baseline pipeline progress updates."""
+        self.statusBar().showMessage(f"Baseline Pipeline: {message}")
+        print(f"DEBUG: Baseline pipeline progress: {message}")
+
+    def _on_baseline_pipeline_finished(self, results):
+        """Handle baseline pipeline completion."""
+        print("DEBUG: Baseline pipeline finished successfully")
+        
+        # Store results
+        self.baseline_results = results
+        
+        # Update UI state
+        self._set_ui_busy(False, "baseline_pipeline")
+        
+        # Update the baseline plot
+        self.update_baseline_plot()
+        
+        # Show completion message
+        self.statusBar().showMessage("Baseline pipeline completed successfully!", 5000)
+
+    def _on_baseline_pipeline_error(self, error_message: str):
+        """Handle baseline pipeline errors."""
+        print(f"ERROR in baseline pipeline: {error_message}")
+        
+        # Update UI state
+        self._set_ui_busy(False, "baseline_pipeline")
+        
+        # Show error message
+        self.statusBar().showMessage(f"Baseline pipeline error: {error_message}", 10000)
+
     def run_bayesian_pipeline(self):
         """Run the Bayesian pipeline."""
-        if not (self.observation and self.observation.is_loaded):
+        # Check if data is loaded
+        is_loaded = False
+        if self.observation:
+            if isinstance(self.observation, dict):
+                is_loaded = all(obs.is_loaded for obs in self.observation.values())
+            else:
+                is_loaded = self.observation.is_loaded
+        
+        if not is_loaded:
             self.statusBar().showMessage("Please load data first.", 5000)
             return
         
@@ -2696,11 +2974,13 @@ class DataInspector(QMainWindow):
         self.detrend_params_stack.setCurrentIndex(index)
     
     def on_mouse_move(self, event):
-        if not (event.inaxes and event.inaxes == self.image_ax and self.observation and self.observation.processed_signal is not None):
+        # Get the appropriate observation for processing
+        obs = self._get_observation_for_processing()
+        if not (event.inaxes and event.inaxes == self.image_ax and obs and obs.processed_signal is not None):
             return
             
         x, y = int(event.xdata or 0), int(event.ydata or 0)
-        data = self.observation.get_data('numpy')
+        data = obs.get_data('numpy')
         
         # Check if the mouse cursor is within the valid bounds of the image data array.
         # This prevents IndexError if the mouse moves off the edge of the plot.
@@ -3087,6 +3367,190 @@ class DataInspector(QMainWindow):
             show_ground_truth=show_ground_truth,
             log_scale=log_scale
         )
+        
+        # Update transit fit plot if baseline results are available
+        if hasattr(self, 'baseline_results') and self.baseline_results is not None:
+            self.update_transit_fit_plot()
+
+    def update_transit_fit_plot(self):
+        """Update the transit fit plot for the selected wavelength."""
+        import numpy as np
+        
+        if not hasattr(self, 'baseline_results') or self.baseline_results is None:
+            # Show no data message
+            self.transit_fit_figure.clear()
+            ax = self.transit_fit_figure.add_subplot(111)
+            ax.set_title("No Baseline Results Available")
+            ax.set_xlabel("Time Index")
+            ax.set_ylabel("Flux")
+            ax.text(0.5, 0.5, "Please run the baseline pipeline first", 
+                   transform=ax.transAxes, ha='center', va='center')
+            self.transit_fit_canvas.draw()
+            return
+        
+        # Get the selected wavelength index
+        wavelength_idx = self.transit_wavelength_spinbox.value()
+        
+        # Get the preprocessed signal
+        preprocessed_signal = self.baseline_results.get('preprocessed_signal')
+        if preprocessed_signal is None:
+            return
+        
+        # Convert to numpy if needed
+        if hasattr(preprocessed_signal, 'get'):  # CuPy array
+            preprocessed_signal = preprocessed_signal.get()
+        
+        # Get the light curve for the selected wavelength
+        if wavelength_idx >= preprocessed_signal.shape[1]:
+            return
+        
+        light_curve = preprocessed_signal[:, wavelength_idx]
+        
+        # Get transit phases
+        transit_phases = getattr(self, 'transit_phases', None)
+        if transit_phases is None:
+            # Try to get from baseline results
+            pipeline_params = self.baseline_results.get('pipeline_params', {})
+            if 'transit_phases' in pipeline_params:
+                transit_phases = pipeline_params['transit_phases']
+            else:
+                # Try to get from the baseline results directly
+                transit_phases = self.baseline_results.get('transit_phases', (50, 100))
+        
+        phase1, phase2 = transit_phases
+        # Convert to regular Python integers if they're CuPy arrays
+        if hasattr(phase1, 'get'):
+            phase1 = int(phase1.get())
+        else:
+            phase1 = int(phase1)
+        if hasattr(phase2, 'get'):
+            phase2 = int(phase2.get())
+        else:
+            phase2 = int(phase2)
+        print(f"DEBUG: Transit phases for wavelength {wavelength_idx}: {phase1} -> {phase2} (duration: {phase2 - phase1})")
+        
+        # Get optimized transit depth
+        optimized_depth = self.baseline_results.get('optimized_transit_depth', 0.001)
+        
+        # Create the plot
+        self.transit_fit_figure.clear()
+        ax = self.transit_fit_figure.add_subplot(111)
+        
+        # Plot the original light curve (before transit detrending)
+        time_points = np.arange(len(light_curve))
+        ax.plot(time_points, light_curve, 'b-', linewidth=1, alpha=0.8, label='Original Light Curve')
+        
+        # Show transit phases if requested
+        if self.transit_show_phases_checkbox.isChecked():
+            ax.axvline(x=phase1, color='red', linestyle='--', alpha=0.7, label=f'Phase 1: {phase1}')
+            ax.axvline(x=phase2, color='red', linestyle='--', alpha=0.7, label=f'Phase 2: {phase2}')
+            ax.axvspan(phase1, phase2, alpha=0.2, color='red', label='Transit Region')
+        
+        # Show depth measurement if requested
+        if self.transit_show_depth_checkbox.isChecked() and self.transit_show_polynomial_checkbox.isChecked():
+            # Find the deepest point in the transit (center of transit)
+            transit_center = (phase1 + phase2) // 2
+            
+            # Get the polynomial fit value at the transit center
+            delta = 7  # MODEL_OPTIMIZATION_DELTA from the notebook
+            start_idx = max(0, phase1 + delta)
+            end_idx = min(len(light_curve), phase2 - delta)
+            
+            # Create the modified signal for polynomial fitting (same as objective function)
+            y_for_fit = np.concatenate([
+                light_curve[:phase1 - delta] if phase1 - delta > 0 else [],
+                light_curve[start_idx:end_idx] * (1 + optimized_depth) if start_idx < end_idx else [],
+                light_curve[phase2 + delta:] if phase2 + delta < len(light_curve) else []
+            ])
+            x_for_fit = np.concatenate([
+                np.arange(phase1 - delta) if phase1 - delta > 0 else [],
+                np.arange(start_idx, end_idx) if start_idx < end_idx else [],
+                np.arange(phase2 + delta, len(light_curve)) if phase2 + delta < len(light_curve) else []
+            ])
+            
+            if len(y_for_fit) > 3:  # Need at least 4 points for 3rd degree polynomial
+                # Fit 3rd degree polynomial (same as baseline)
+                coeffs = np.polyfit(x_for_fit, y_for_fit, deg=3)
+                poly = np.poly1d(coeffs)
+                
+                # Get polynomial value at transit center
+                poly_value_at_center = poly(transit_center)
+                original_value_at_center = light_curve[transit_center]
+                
+                # Draw vertical line showing the depth measurement
+                ax.plot([transit_center, transit_center], 
+                       [original_value_at_center, poly_value_at_center], 
+                       'red', linewidth=3, alpha=0.8)
+                
+                # Add depth annotation
+                depth_value = (poly_value_at_center - original_value_at_center) / poly_value_at_center
+                mid_y = (original_value_at_center + poly_value_at_center) / 2
+                ax.annotate(f'Depth: {depth_value:.5f}\n({optimized_depth:.5f})', 
+                           xy=(transit_center, mid_y), 
+                           xytext=(transit_center + 10, mid_y),
+                           fontsize=10, ha='left', va='center',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                           arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
+        
+        # Show polynomial fit if requested
+        if self.transit_show_polynomial_checkbox.isChecked():
+            # Create the polynomial fit exactly as the baseline pipeline does
+            delta = 7  # MODEL_OPTIMIZATION_DELTA from the notebook
+            start_idx = max(0, phase1 + delta)
+            end_idx = min(len(light_curve), phase2 - delta)
+            
+            # Create the modified signal for polynomial fitting (same as objective function)
+            y_for_fit = np.concatenate([
+                light_curve[:phase1 - delta] if phase1 - delta > 0 else [],
+                light_curve[start_idx:end_idx] * (1 + optimized_depth) if start_idx < end_idx else [],
+                light_curve[phase2 + delta:] if phase2 + delta < len(light_curve) else []
+            ])
+            x_for_fit = np.concatenate([
+                np.arange(phase1 - delta) if phase1 - delta > 0 else [],
+                np.arange(start_idx, end_idx) if start_idx < end_idx else [],
+                np.arange(phase2 + delta, len(light_curve)) if phase2 + delta < len(light_curve) else []
+            ])
+            
+            if len(y_for_fit) > 3:  # Need at least 4 points for 3rd degree polynomial
+                # Fit 3rd degree polynomial (same as baseline)
+                coeffs = np.polyfit(x_for_fit, y_for_fit, deg=3)
+                poly = np.poly1d(coeffs)
+                
+                # Plot the polynomial fit over the full time range
+                poly_y = poly(time_points)
+                ax.plot(time_points, poly_y, 'orange', linewidth=2, alpha=0.8, 
+                       label=f'Polynomial Fit (degree=3)', linestyle='--')
+        
+        # Format the plot
+        if wavelength_idx == 0:
+            ax.set_title(f'Transit Fit - Index {wavelength_idx} (FGS1)')
+        else:
+            ax.set_title(f'Transit Fit - Index {wavelength_idx} (AIRS-CH0, Wavelength {wavelength_idx-1})')
+        ax.set_xlabel('Time Index')
+        ax.set_ylabel('Flux')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Add info box with instrument information
+        if wavelength_idx == 0:
+            instrument_info = "FGS1"
+            wl_info = "Single wavelength"
+        else:
+            instrument_info = "AIRS-CH0"
+            wl_info = f"Wavelength {wavelength_idx-1}/281"
+        
+        info_text = f'Wavelength Index: {wavelength_idx} ({instrument_info})\n'
+        info_text += f'{wl_info}\n'
+        info_text += f'Transit Depth: {optimized_depth:.6f}\n'
+        info_text += f'Phase 1: {phase1}\n'
+        info_text += f'Phase 2: {phase2}\n'
+        info_text += f'Signal Range: {light_curve.min():.4f} - {light_curve.max():.4f}'
+        
+        ax.text(0.02, 0.98, info_text, transform=ax.transAxes, 
+               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        self.transit_fit_figure.tight_layout()
+        self.transit_fit_canvas.draw()
 
 class BaselinePlotter:
     """Plotter for baseline pipeline results."""
@@ -3240,18 +3704,18 @@ class BaselinePlotter:
         # Set UI to busy state
         self._set_ui_busy(True, "baseline_pipeline")
         
-        # Get pipeline parameters
+        # Get pipeline parameters from UI
         pipeline_params = {
             'instrument': self.current_instrument,
             'use_gpu': self.current_backend == 'gpu',
-            'scale': 0.95,  # Default baseline parameters
-            'sigma': 0.0009,
-            'cut_inf': 39,
-            'cut_sup': 321,
-            'binning': 30,
-            'phase_detection_slice': (30, 140),  # Tuple instead of slice for serialization
-            'optimization_delta': 7,
-            'polynomial_degree': 3
+            'scale': self.baseline_scale_spinbox.value(),
+            'sigma': self.baseline_sigma_spinbox.value(),
+            'cut_inf': self.baseline_cut_inf_spinbox.value(),
+            'cut_sup': self.baseline_cut_sup_spinbox.value(),
+            'binning': self.baseline_binning_spinbox.value(),
+            'phase_detection_slice': (self.baseline_phase_start_spinbox.value(), self.baseline_phase_end_spinbox.value()),
+            'optimization_delta': self.baseline_optimization_delta_spinbox.value(),
+            'polynomial_degree': self.baseline_polynomial_degree_spinbox.value()
         }
         
         # Run baseline pipeline asynchronously
@@ -3444,6 +3908,7 @@ class BaselinePipelineWorker(QThread):
     
     def run(self):
         """Run the baseline pipeline in a separate thread."""
+        import traceback
         try:
             print("DEBUG: Starting baseline pipeline in worker thread")
             
@@ -3469,7 +3934,7 @@ class BaselinePipelineWorker(QThread):
                 self.progress_signal.emit("Making predictions...")
                 self.check_stop()
                 
-                predictions, uncertainties = pipeline.predict(self.observation)
+                predictions, uncertainties, covariance_matrix = pipeline.predict(self.observation)
                 
             else:
                 # Single instrument loaded
@@ -3483,14 +3948,17 @@ class BaselinePipelineWorker(QThread):
                 self.progress_signal.emit("Making predictions...")
                 self.check_stop()
                 
-                predictions, uncertainties = pipeline.predict(self.observation)
+                predictions, uncertainties, covariance_matrix = pipeline.predict(self.observation)
             
             # Store results
             results = {
                 'predictions': predictions,
                 'uncertainties': uncertainties,
+                'covariance_matrix': covariance_matrix,
                 'pipeline_params': self.pipeline_params,
-                'optimized_transit_depth': getattr(pipeline, 'optimized_transit_depth', None)
+                'optimized_transit_depth': getattr(pipeline, 'optimized_transit_depth', None),
+                'transit_phases': getattr(pipeline, 'transit_phases', None),
+                'preprocessed_signal': getattr(pipeline, 'fitted_components', {}).get('preprocessed_signal', None)
             }
             
             # Final check before emitting success
@@ -3517,6 +3985,55 @@ class BaselinePipelineWorker(QThread):
     def stop(self):
         """Request the worker to stop."""
         self._should_stop = True
+
+    def _get_observation_for_processing(self):
+        """Get the appropriate observation object for processing."""
+        if not self.observation:
+            return None
+        
+        if isinstance(self.observation, dict):
+            # For processing, use AIRS-CH0 if available, otherwise use the first one
+            if "AIRS-CH0" in self.observation:
+                return self.observation["AIRS-CH0"]
+            else:
+                return list(self.observation.values())[0]
+        else:
+            return self.observation
+    
+    def _abort_pipeline_changes(self):
+        """Safely abort any partial pipeline changes."""
+        # Clean up GPU memory if we were using GPyTorch
+        if hasattr(self, 'worker') and self.worker and hasattr(self.worker, 'detrender'):
+            detrender_class = self.worker.detrender.__class__.__name__
+            if 'GPyTorch' in detrender_class or 'GPU' in detrender_class:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        print("DEBUG: Cleared GPU cache after pipeline abort")
+                except ImportError:
+                    pass
+        
+        if self.observation and self.observation.is_loaded:
+            # Clear any partial pipeline results
+            if hasattr(self.observation, 'detrended_light_curves'):
+                self.observation.detrended_light_curves = None
+            if hasattr(self.observation, 'noise_models'):
+                self.observation.noise_models = None
+            if hasattr(self.observation, 'phase_folded_lc'):
+                self.observation.phase_folded_lc = None
+            
+            # Ensure we're back to a clean state
+            self._ensure_clean_state()
+            
+            # Update plots to show original data
+            self._update_all_plots()
+        
+        # Clear any stored results
+        if hasattr(self, 'bayesian_results'):
+            self.bayesian_results = None
+        if hasattr(self, 'baseline_results'):
+            self.baseline_results = None
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

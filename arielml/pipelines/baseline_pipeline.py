@@ -135,18 +135,29 @@ class BaselinePipeline(BasePipeline, Observable):
         # Apply Correlated Double Sampling (CDS)
         cds_signal = mean_signal[1::2] - mean_signal[0::2]
         
-        # Time binning
-        n_bins = cds_signal.shape[0] // self.binning
+        # Time binning with instrument-specific binning
+        if self.instrument == "FGS1":
+            # FGS1 needs more aggressive binning (30 * 12 = 360) to match AIRS-CH0 time dimension
+            binning_factor = 360
+        else:
+            # AIRS-CH0 uses standard binning (30)
+            binning_factor = 30
+            
+        n_bins = cds_signal.shape[0] // binning_factor
         binned = self.xp.array([
-            cds_signal[j*self.binning : (j+1)*self.binning].mean(axis=0) 
+            cds_signal[j*binning_factor : (j+1)*binning_factor].mean(axis=0) 
             for j in range(n_bins)
         ])
         
-        # Reshape FGS1 to match AIRS-CH0 format
-        if self.instrument == "FGS1":
+        # Ensure consistent shape: (time_bins, wavelengths)
+        if len(binned.shape) == 1:
+            # If 1D, reshape to (time_bins, 1)
             binned = binned.reshape((binned.shape[0], 1))
+        elif len(binned.shape) > 2:
+            # If more than 2D, flatten wavelength dimensions
+            binned = binned.reshape((binned.shape[0], -1))
         
-        self._emit_progress(f"Preprocessing complete: {binned.shape}")
+        self._emit_progress(f"Preprocessing complete: {binned.shape} (instrument: {self.instrument}, binning_factor: {binning_factor})")
         return binned
     
     def _phase_detector(self, signal: np.ndarray) -> Tuple[int, int]:
@@ -180,6 +191,8 @@ class BaselinePipeline(BasePipeline, Observable):
     
     def _objective_function(self, s: float, signal: np.ndarray, phase1: int, phase2: int) -> float:
         """Objective function for transit depth optimization."""
+        import numpy as np
+        
         delta = self.optimization_delta
         power = self.polynomial_degree
         
@@ -188,17 +201,17 @@ class BaselinePipeline(BasePipeline, Observable):
             delta = 2
         
         # Create modified signal with transit depth applied
-        y = self.xp.concatenate([
+        y = np.concatenate([
             signal[:phase1 - delta],
             signal[phase1 + delta:phase2 - delta] * (1 + s),
             signal[phase2 + delta:]
         ])
-        x = self.xp.arange(len(y))
+        x = np.arange(len(y))
         
         # Fit polynomial and calculate error
-        coeffs = self.xp.polyfit(x, y, deg=power)
-        poly = self.xp.poly1d(coeffs)
-        error = self.xp.mean(self.xp.abs(poly(x) - y))
+        coeffs = np.polyfit(x, y, deg=power)
+        poly = np.poly1d(coeffs)
+        error = np.mean(np.abs(poly(x) - y))
         
         return error
     
@@ -212,18 +225,31 @@ class BaselinePipeline(BasePipeline, Observable):
             airs_obs = observation["AIRS-CH0"]
             fgs_obs = observation["FGS1"]
             
-            # Preprocess both signals
+            # Preprocess both signals with correct instrument settings
+            original_instrument = self.instrument
+            
+            # Process AIRS-CH0
+            self.instrument = "AIRS-CH0"
             airs_signal = self._preprocess_signal(airs_obs)
+            
+            # Process FGS1
+            self.instrument = "FGS1"
             fgs_signal = self._preprocess_signal(fgs_obs)
             
+            # Restore original instrument setting
+            self.instrument = original_instrument
+            
             # Concatenate signals: FGS1 (1 wavelength) + AIRS-CH0 (282 wavelengths) = 283 total
+            print(f"DEBUG: FGS signal shape: {fgs_signal.shape}")
+            print(f"DEBUG: AIRS signal shape: {airs_signal.shape}")
             preprocessed_signal = self.xp.concatenate([fgs_signal, airs_signal], axis=1)
             self.fitted_components['preprocessed_signal'] = preprocessed_signal
             self.fitted_components['airs_signal'] = airs_signal
             self.fitted_components['fgs_signal'] = fgs_signal
             
-            # Create 1D signal for phase detection (mean across all wavelengths)
-            signal_1d = preprocessed_signal.mean(axis=1)
+            # Create 1D signal for phase detection (mean across wavelengths 1-283, excluding FGS1)
+            # FGS1 is the first column (index 0), AIRS-CH0 is columns 1-282
+            signal_1d = preprocessed_signal[:, 1:].mean(axis=1)
             
         else:
             # Single instrument loaded
@@ -234,7 +260,12 @@ class BaselinePipeline(BasePipeline, Observable):
             self.fitted_components['preprocessed_signal'] = preprocessed_signal
             
             # Create 1D signal for phase detection (mean across wavelengths)
-            signal_1d = preprocessed_signal[:, 1:].mean(axis=1) if preprocessed_signal.shape[1] > 1 else preprocessed_signal.flatten()
+            if self.instrument == "FGS1":
+                # FGS1 has only 1 wavelength, use it directly
+                signal_1d = preprocessed_signal.flatten()
+            else:
+                # AIRS-CH0 has multiple wavelengths, use mean across all
+                signal_1d = preprocessed_signal.mean(axis=1)
         
         # Apply Savitzky-Golay smoothing (convert to numpy for scipy compatibility)
         signal_1d_np = self.xp.asnumpy(signal_1d) if hasattr(self.xp, 'asnumpy') else signal_1d
@@ -258,12 +289,14 @@ class BaselinePipeline(BasePipeline, Observable):
         phase1_np = int(self.xp.asnumpy(phase1)) if hasattr(self.xp, 'asnumpy') else int(phase1)
         phase2_np = int(self.xp.asnumpy(phase2)) if hasattr(self.xp, 'asnumpy') else int(phase2)
         
+        print(f"DEBUG: Starting optimization with signal shape: {signal_1d_np.shape}, phases: {phase1_np} -> {phase2_np}")
         result = minimize(
             fun=self._objective_function,
             x0=[0.0001],
             args=(signal_1d_np, phase1_np, phase2_np),
             method="Nelder-Mead"
         )
+        print(f"DEBUG: Optimization completed, result: {result.x[0]}")
         
         self.optimized_transit_depth = result.x[0] * self.scale
         self.fitted_components['optimized_transit_depth'] = self.optimized_transit_depth
