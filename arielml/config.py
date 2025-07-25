@@ -55,7 +55,7 @@ PHOTOMETRY_APERTURES = {
 }
 
 # --- Detrending Hyperparameters ---
-# Legacy hyperparameters extracted from arielgp pickle files
+
 
 # AIRS-CH0 drift hyperparameters
 AIRS_DRIFT_HYPERPARAMS = {

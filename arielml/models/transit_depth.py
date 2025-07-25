@@ -14,13 +14,7 @@ try:
 except ImportError:
     BACKEND_AVAILABLE = False
 
-# Import arielgp hyperparameters
-try:
-    from ...arielgp import ariel_support as ars
-    ARIELGP_AVAILABLE = True
-except ImportError:
-    ARIELGP_AVAILABLE = False
-    print("Warning: arielgp not available. Using default hyperparameters.")
+
 
 
 class TransitDepthModel:
@@ -40,14 +34,7 @@ class TransitDepthModel:
             self.xp = np
             self.backend_name = 'cpu'
         
-        # Load arielgp PCA info if available
-        if ARIELGP_AVAILABLE:
-            try:
-                self.transit_prior_info = ars.pickle_load(ars.file_loc() + 'transit_depth_gp_with_pca.pickle')
-            except:
-                self.transit_prior_info = None
-        else:
-            self.transit_prior_info = None
+        self.transit_prior_info = None
     
     def fit(self, flux: np.ndarray, transit_mask: np.ndarray) -> np.ndarray:
         """Fit transit depth variation with improved estimation."""

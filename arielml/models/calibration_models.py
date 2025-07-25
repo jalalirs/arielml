@@ -1,7 +1,7 @@
 """
 Calibration Models - Optimize uncertainty calibration and mean bias correction.
 
-These models implement the SigmaFudger and MeanBiasFitter from arielgp to improve
+These models implement the SigmaFudger and MeanBiasFitter  to improve
 prediction quality by calibrating uncertainties and correcting mean bias.
 """
 

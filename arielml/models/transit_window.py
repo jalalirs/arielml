@@ -7,13 +7,7 @@ This model handles the transit window component in the Bayesian framework.
 import numpy as np
 from typing import Optional
 
-# Import arielgp hyperparameters
-try:
-    from ...arielgp import ariel_support as ars
-    ARIELGP_AVAILABLE = True
-except ImportError:
-    ARIELGP_AVAILABLE = False
-    print("Warning: arielgp not available. Using default hyperparameters.")
+
 
 
 class TransitWindowModel:
@@ -24,14 +18,8 @@ class TransitWindowModel:
         self.egress_time: Optional[float] = None
         self.width: Optional[float] = None
         
-        # Load arielgp transit window if available
-        if ARIELGP_AVAILABLE:
-            try:
-                self.transit_splines = ars.pickle_load(ars.file_loc() + 'ingress_egress_window3.pickle')
-            except:
-                self.transit_splines = None
-        else:
-            self.transit_splines = None
+        
+        self.transit_splines = None
     
     def fit(self, time: np.ndarray, transit_mask: np.ndarray) -> np.ndarray:
         """Fit transit window parameters."""

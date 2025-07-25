@@ -3051,6 +3051,31 @@ class DataInspector(QMainWindow):
         # Trigger the change handler to update tab visibility
         self.on_pipeline_mode_change(self.pipeline_mode_combo.currentText())
 
+    def update_baseline_plot(self):
+        """Update the baseline results plot using the baseline plotter."""
+        # Get checkbox states
+        show_uncertainties = self.baseline_show_uncertainties_checkbox.isChecked()
+        show_ground_truth = self.baseline_show_ground_truth_checkbox.isChecked()
+        log_scale = self.baseline_log_scale_checkbox.isChecked()
+        
+        # Get the appropriate observation for ground truth
+        observation = None
+        if isinstance(self.observation, dict):
+            # Both instruments loaded - use AIRS-CH0 for ground truth (more wavelengths)
+            observation = self.observation.get("AIRS-CH0")
+        else:
+            # Single instrument loaded
+            observation = self.observation
+        
+        # Use the baseline plotter to handle the visualization
+        self.baseline_plotter.plot_results(
+            baseline_results=getattr(self, 'baseline_results', None),
+            observation=observation,
+            show_uncertainties=show_uncertainties,
+            show_ground_truth=show_ground_truth,
+            log_scale=log_scale
+        )
+
 class BaselinePlotter:
     """Plotter for baseline pipeline results."""
     
@@ -3291,31 +3316,6 @@ class BaselinePlotter:
         if hasattr(self, 'baseline_worker') and self.baseline_worker:
             self.baseline_worker.deleteLater()
             self.baseline_worker = None
-
-    def update_baseline_plot(self):
-        """Update the baseline results plot using the baseline plotter."""
-        # Get checkbox states
-        show_uncertainties = self.baseline_show_uncertainties_checkbox.isChecked()
-        show_ground_truth = self.baseline_show_ground_truth_checkbox.isChecked()
-        log_scale = self.baseline_log_scale_checkbox.isChecked()
-        
-        # Get the appropriate observation for ground truth
-        observation = None
-        if isinstance(self.observation, dict):
-            # Both instruments loaded - use AIRS-CH0 for ground truth (more wavelengths)
-            observation = self.observation.get("AIRS-CH0")
-        else:
-            # Single instrument loaded
-            observation = self.observation
-        
-        # Use the baseline plotter to handle the visualization
-        self.baseline_plotter.plot_results(
-            baseline_results=getattr(self, 'baseline_results', None),
-            observation=observation,
-            show_uncertainties=show_uncertainties,
-            show_ground_truth=show_ground_truth,
-            log_scale=log_scale
-        )
 
     def update_components_plot(self):
         """Update the component analysis plot."""

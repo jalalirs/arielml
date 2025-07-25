@@ -2,7 +2,7 @@
 Bayesian Pipeline - Complete re-implementation of ariel_gp approach.
 
 This pipeline implements the full Bayesian framework: (star_spectrum * drift * transit) + noise
-and returns transit depths directly, just like the arielgp code.
+and returns transit depths directly.
 """
 
 import numpy as np
@@ -50,13 +50,7 @@ class BasePipeline:
         """
         raise NotImplementedError("Subclasses must implement predict_with_uncertainties")
 
-# Import arielgp hyperparameters
-try:
-    from ...arielgp import ariel_support as ars
-    ARIELGP_AVAILABLE = True
-except ImportError:
-    ARIELGP_AVAILABLE = False
-    print("Warning: arielgp not available. Using default hyperparameters.")
+
 
 
 class BayesianPipeline(BasePipeline):
@@ -66,7 +60,7 @@ class BayesianPipeline(BasePipeline):
     This pipeline does both detrending and transit modeling in one integrated framework:
     (star_spectrum * drift * transit) + noise
     
-    Returns transit depths directly, just like the arielgp code.
+    Returns transit depths directly.
     """
     
     def __init__(self, 
@@ -363,13 +357,13 @@ class BayesianPipeline(BasePipeline):
         """
         Set default calibration values for testing purposes.
         
-        These are typical values based on arielgp training results.
+        These are typical values based on.
         """
-        # Typical sigma fudge values from arielgp (usually between 1.0-1.5)
+        # Typical sigma fudge values from  (usually between 1.0-1.5)
         self.sigma_fudger.fudge_value = 2.4255123406039303
         self.sigma_fudger.is_fitted = True
         
-        # Typical bias correction values from arielgp (usually small corrections)
+        # Typical bias correction values from  (usually small corrections)
         self.mean_bias_fitter.bias = 0.00519137046136410
         self.mean_bias_fitter.scale = 0.0001
         self.mean_bias_fitter.is_fitted = True
