@@ -23,6 +23,7 @@ from matplotlib.patches import Rectangle
 from arielml.data.observation import DataObservation
 from arielml.data import loaders, detrending
 from arielml.pipelines.bayesian_pipeline import BayesianPipeline
+from arielml.pipelines.baseline_pipeline import BaselinePipeline
 from arielml.config import DATASET_DIR, PHOTOMETRY_APERTURES, WAVELENGTH_RANGES
 from arielml.backend import GPU_ENABLED, GP_GPU_ENABLED
 from arielml.utils.signals import DetrendingProgress
@@ -277,7 +278,6 @@ class BayesianPlotter:
         self.ax.legend()
         self.ax.grid(True, alpha=0.3)
 
-
 class CovariancePlotter:
     """Handles plotting of covariance matrices."""
     
@@ -297,12 +297,11 @@ class CovariancePlotter:
         except Exception as e:
             print(f"Warning: Could not display covariance matrix: {e}")
 
-
 class DataLoadingWorker(QThread):
     """Worker thread for loading data asynchronously."""
     
     progress_signal = pyqtSignal(str)  # Simple string messages for loading
-    finished_signal = pyqtSignal(object)  # Emit the loaded observation
+    finished_signal = pyqtSignal(object)  # Emit the loaded observation(s)
     error_signal = pyqtSignal(str)
     
     def __init__(self, planet_id, instrument, obs_id, split, backend):
@@ -316,23 +315,42 @@ class DataLoadingWorker(QThread):
     
     def run(self):
         """Load data in a separate thread."""
-        observation = None
+        observations = None
         try:
-            self.progress_signal.emit("Creating observation object...")
-            self.check_stop()
-            
-            observation = DataObservation(self.planet_id, self.instrument, int(self.obs_id), self.split)
-            
-            self.progress_signal.emit("Loading raw data...")
-            self.check_stop()
-            
-            observation.load(backend=self.backend)
+            if self.instrument == "Both":
+                # Load both instruments
+                self.progress_signal.emit("Loading AIRS-CH0 data...")
+                self.check_stop()
+                
+                airs_observation = DataObservation(self.planet_id, "AIRS-CH0", int(self.obs_id), self.split)
+                airs_observation.load(backend=self.backend)
+                
+                self.progress_signal.emit("Loading FGS1 data...")
+                self.check_stop()
+                
+                fgs_observation = DataObservation(self.planet_id, "FGS1", int(self.obs_id), self.split)
+                fgs_observation.load(backend=self.backend)
+                
+                observations = {"AIRS-CH0": airs_observation, "FGS1": fgs_observation}
+                self.progress_signal.emit("Both instruments loaded successfully")
+            else:
+                # Load single instrument
+                self.progress_signal.emit("Creating observation object...")
+                self.check_stop()
+                
+                observation = DataObservation(self.planet_id, self.instrument, int(self.obs_id), self.split)
+                
+                self.progress_signal.emit("Loading raw data...")
+                self.check_stop()
+                
+                observation.load(backend=self.backend)
+                observations = observation
             
             # Final check before emitting success
             self.check_stop()
             
             self.progress_signal.emit("Data loading completed")
-            self.finished_signal.emit(observation)
+            self.finished_signal.emit(observations)
             
         except InterruptedError:
             # Operation was stopped by user - don't emit error
@@ -348,7 +366,6 @@ class DataLoadingWorker(QThread):
     def stop(self):
         """Request the worker to stop."""
         self._should_stop = True
-
 
 class BayesianPipelineWorker(QThread):
     """Worker thread for running the Bayesian pipeline asynchronously."""
@@ -540,7 +557,6 @@ class BayesianPipelineWorker(QThread):
         except ImportError:
             pass
 
-
 class PipelineWorker(QThread):
     """Worker thread for running the pipeline asynchronously."""
     
@@ -659,7 +675,6 @@ class PipelineWorker(QThread):
                 except ImportError:
                     pass
 
-
 class DataInspector(QMainWindow):
     """
     A PyQt GUI application to inspect Ariel dataset files and visualize
@@ -674,6 +689,7 @@ class DataInspector(QMainWindow):
         "Phase-Folded View": ["preprocessing"],  # Only preprocessing does phase folding
         "Bayesian Results": ["bayesian"],  # Only Bayesian pipeline
         "Component Analysis": ["bayesian"],  # Only Bayesian has fitted components
+        "Baseline Results": ["baseline"],  # Only Baseline pipeline
         "Performance Log": ["all"]  # Always visible
     }
     
@@ -908,7 +924,7 @@ class DataInspector(QMainWindow):
         # Instrument selection
         self.instrument_combo = QComboBox()
         self.instrument_combo.setObjectName("Instrument")
-        self.instrument_combo.addItems(["AIRS-CH0", "FGS1"])
+        self.instrument_combo.addItems(["AIRS-CH0", "FGS1", "Both"])
         self.instrument_combo.currentTextChanged.connect(self.populate_obs_ids)
         nav_layout.addRow("Instrument:", self.instrument_combo)
 
@@ -1240,6 +1256,9 @@ class DataInspector(QMainWindow):
         self.bayesian_canvas = FigureCanvas(Figure(figsize=(10, 6), tight_layout=True))
         self.components_canvas = FigureCanvas(Figure(figsize=(12, 8), tight_layout=True))
         
+        # Baseline visualization canvas
+        self.baseline_canvas = FigureCanvas(Figure(figsize=(10, 6), tight_layout=True))
+        
         self.image_ax = self.image_canvas.figure.subplots()
         self.single_lc_ax = self.single_lc_canvas.figure.subplots()
         self.detrended_lc_ax = self.detrended_lc_canvas.figure.subplots()
@@ -1250,8 +1269,12 @@ class DataInspector(QMainWindow):
         self.components_ax = self.components_canvas.figure.subplots(2, 3)  # 2x3 grid for components
         self.components_ax = self.components_ax.flatten()  # Flatten for easier indexing
         
+        # Baseline visualization axes
+        self.baseline_ax = self.baseline_canvas.figure.subplots()
+        
         # Initialize plotters
         self.bayesian_plotter = BayesianPlotter(self.bayesian_ax, self.bayesian_canvas)
+        self.baseline_plotter = BaselinePlotter(self.baseline_ax, self.baseline_canvas)
         
         self.image_cbar = None
 
@@ -1262,6 +1285,7 @@ class DataInspector(QMainWindow):
         self.tab_indices["Phase-Folded View"] = tabs.addTab(self.phase_folded_canvas, "Phase-Folded View")
         self.tab_indices["Bayesian Results"] = tabs.addTab(self._create_bayesian_tab(), "Bayesian Results")
         self.tab_indices["Component Analysis"] = tabs.addTab(self._create_components_tab(), "Component Analysis")
+        self.tab_indices["Baseline Results"] = tabs.addTab(self._create_baseline_tab(), "Baseline Results")
         self.log_display = QTextEdit(); self.log_display.setReadOnly(True)
         self.tab_indices["Performance Log"] = tabs.addTab(self.log_display, "Performance Log")
         
@@ -1353,13 +1377,56 @@ class DataInspector(QMainWindow):
     def _create_detrended_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); self.zoom_checkbox = QCheckBox("Zoom to Transit"); self.zoom_checkbox.toggled.connect(self.update_detrended_plot); layout.addWidget(self.zoom_checkbox); layout.addWidget(self.detrended_lc_canvas); return tab
 
+    def _create_baseline_tab(self):
+        """Create the baseline results tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Controls for baseline visualization
+        controls_group = QGroupBox("Baseline Visualization Controls")
+        controls_layout = QHBoxLayout(controls_group)
+        
+        self.baseline_show_uncertainties_checkbox = QCheckBox("Show Uncertainties")
+        self.baseline_show_uncertainties_checkbox.setChecked(True)
+        self.baseline_show_uncertainties_checkbox.toggled.connect(self.update_baseline_plot)
+        controls_layout.addWidget(self.baseline_show_uncertainties_checkbox)
+        
+        self.baseline_show_ground_truth_checkbox = QCheckBox("Show Ground Truth")
+        self.baseline_show_ground_truth_checkbox.setChecked(True)
+        self.baseline_show_ground_truth_checkbox.setEnabled(False)  # Will be enabled when data is loaded
+        self.baseline_show_ground_truth_checkbox.toggled.connect(self.update_baseline_plot)
+        controls_layout.addWidget(self.baseline_show_ground_truth_checkbox)
+        
+        # Add log scale option for better comparison
+        self.baseline_log_scale_checkbox = QCheckBox("Log Scale Y-Axis")
+        self.baseline_log_scale_checkbox.setChecked(False)
+        self.baseline_log_scale_checkbox.toggled.connect(self.update_baseline_plot)
+        controls_layout.addWidget(self.baseline_log_scale_checkbox)
+        
+        layout.addWidget(controls_group)
+        layout.addWidget(self.baseline_canvas)
+        
+        return tab
+
     # --- Core Logic ---
 
     def run_pipeline(self):
         """Run the appropriate pipeline based on the selected mode."""
-        if not (self.observation and self.observation.is_loaded):
+        if not self.observation:
             self.statusBar().showMessage("Please load data first.", 5000)
             return
+        
+        # Check if we have both instruments or single instrument
+        if isinstance(self.observation, dict):
+            # Both instruments loaded
+            if not all(obs.is_loaded for obs in self.observation.values()):
+                self.statusBar().showMessage("Please load data first.", 5000)
+                return
+        else:
+            # Single instrument loaded
+            if not self.observation.is_loaded:
+                self.statusBar().showMessage("Please load data first.", 5000)
+                return
         
         # Check backend compatibility
         selected_backend = self.backend_combo.currentText()
@@ -1375,8 +1442,10 @@ class DataInspector(QMainWindow):
         
         if mode == "Preprocessing Pipeline":
             self.run_preprocessing_pipeline()
-        else:  # Bayesian Pipeline
+        elif mode == "Bayesian Pipeline":
             self.run_bayesian_pipeline()
+        elif mode == "Baseline Pipeline":
+            self.run_baseline_pipeline()
     
     def run_preprocessing_pipeline(self):
         """Run the preprocessing pipeline with detrending."""
@@ -1594,6 +1663,24 @@ class DataInspector(QMainWindow):
             self._abort_pipeline_changes()
             self._on_pipeline_error("Pipeline stopped by user")
             
+        elif self.bayesian_worker and self.bayesian_worker.isRunning():
+            # Stop Bayesian pipeline worker
+            self.bayesian_worker.stop()
+            self.bayesian_worker.wait()  # Wait for thread to finish
+            
+            # Safely abort Bayesian pipeline changes
+            self._abort_pipeline_changes()
+            self._on_bayesian_pipeline_error("Bayesian Pipeline stopped by user")
+            
+        elif hasattr(self, 'baseline_worker') and self.baseline_worker and self.baseline_worker.isRunning():
+            # Stop baseline pipeline worker
+            self.baseline_worker.stop()
+            self.baseline_worker.wait()  # Wait for thread to finish
+            
+            # Safely abort baseline pipeline changes
+            self._abort_pipeline_changes()
+            self._on_baseline_pipeline_error("Baseline Pipeline stopped by user")
+            
         elif self.loading_worker and self.loading_worker.isRunning():
             # Stop loading worker
             self.loading_worker.stop()
@@ -1631,6 +1718,12 @@ class DataInspector(QMainWindow):
             
             # Update plots to show original data
             self._update_all_plots()
+        
+        # Clear any stored results
+        if hasattr(self, 'bayesian_results'):
+            self.bayesian_results = None
+        if hasattr(self, 'baseline_results'):
+            self.baseline_results = None
     
     def _abort_detrending_changes(self):
         """Safely abort any partial detrending changes."""
@@ -1740,6 +1833,16 @@ class DataInspector(QMainWindow):
                         self.bayesian_canvas.draw()
                 except Exception as e:
                     print(f"Warning: Could not clear Bayesian plot: {e}")
+            
+            # Clear baseline plots
+            if hasattr(self, 'baseline_ax') and self.baseline_ax is not None:
+                try:
+                    self.baseline_ax.clear()
+                    self.baseline_ax.set_title("No Baseline Results")
+                    if hasattr(self, 'baseline_canvas') and self.baseline_canvas is not None:
+                        self.baseline_canvas.draw()
+                except Exception as e:
+                    print(f"Warning: Could not clear baseline plot: {e}")
             
             # Clear component analysis plots
             if hasattr(self, 'components_ax') and self.components_ax is not None:
@@ -1872,25 +1975,52 @@ class DataInspector(QMainWindow):
     # --- Plotting and UI Updates ---
 
     def _update_all_plots(self):
-        self.log_display.setText("\n".join(self.observation.calibration_log))
+        # Handle calibration log for both single and multiple observations
+        if isinstance(self.observation, dict):
+            # Both instruments loaded - use AIRS-CH0 for calibration log
+            airs_obs = self.observation.get("AIRS-CH0")
+            if airs_obs and hasattr(airs_obs, 'calibration_log'):
+                self.log_display.setText("\n".join(airs_obs.calibration_log))
+        else:
+            # Single instrument loaded
+            if hasattr(self.observation, 'calibration_log'):
+                self.log_display.setText("\n".join(self.observation.calibration_log))
+        
         self.update_image_plot()
         self.update_light_curve_plots()
         # Update Bayesian plots if results are available
         if hasattr(self, 'bayesian_results') and self.bayesian_results is not None:
             self.update_bayesian_plot()
             self.update_components_plot()
+        # Update baseline plots if results are available
+        if hasattr(self, 'baseline_results') and self.baseline_results is not None:
+            self.update_baseline_plot()
     
     def update_image_plot(self):
-        if not (self.observation and self.observation.is_loaded): 
+        if not self.observation: 
             print("DEBUG: update_image_plot - observation not loaded")
             return
         
+        # Handle both single and multiple observations
+        if isinstance(self.observation, dict):
+            # Both instruments loaded - use AIRS-CH0 for image display
+            observation = self.observation.get("AIRS-CH0")
+            if not observation or not observation.is_loaded:
+                print("DEBUG: update_image_plot - AIRS-CH0 observation not loaded")
+                return
+        else:
+            # Single instrument loaded
+            observation = self.observation
+            if not observation.is_loaded:
+                print("DEBUG: update_image_plot - observation not loaded")
+                return
+        
         # Debug: Check observation state
-        print(f"DEBUG: update_image_plot - observation.is_loaded: {self.observation.is_loaded}")
-        print(f"DEBUG: update_image_plot - processed_signal is None: {self.observation.processed_signal is None}")
-        if self.observation.processed_signal is not None:
-            print(f"DEBUG: update_image_plot - processed_signal shape: {self.observation.processed_signal.shape}")
-            print(f"DEBUG: update_image_plot - processed_signal type: {type(self.observation.processed_signal)}")
+        print(f"DEBUG: update_image_plot - observation.is_loaded: {observation.is_loaded}")
+        print(f"DEBUG: update_image_plot - processed_signal is None: {observation.processed_signal is None}")
+        if observation.processed_signal is not None:
+            print(f"DEBUG: update_image_plot - processed_signal shape: {observation.processed_signal.shape}")
+            print(f"DEBUG: update_image_plot - processed_signal type: {type(observation.processed_signal)}")
         
         # Safely remove the previous colorbar if it exists and is still in the figure
         if self.image_cbar is not None:
@@ -1904,7 +2034,7 @@ class DataInspector(QMainWindow):
         self.image_ax.clear()
         
         # Get processed signal with explicit conversion
-        processed_signal = self.observation.get_data(return_type='numpy')
+        processed_signal = observation.get_data(return_type='numpy')
         print(f"DEBUG: update_image_plot - after get_data, type: {type(processed_signal)}")
         print(f"DEBUG: update_image_plot - after get_data, shape: {processed_signal.shape if processed_signal is not None else 'None'}")
         
@@ -1937,37 +2067,52 @@ class DataInspector(QMainWindow):
             self.image_canvas.draw()
     
     def update_light_curve_plots(self):
-        if not (self.observation and self.observation.is_loaded): return
-        self.update_photometry_plot(); self.update_detrended_plot(); self.update_phase_folded_plot()
+        if not self.observation: return
+        
+        # Handle both single and multiple observations
+        if isinstance(self.observation, dict):
+            # Both instruments loaded - use AIRS-CH0 for light curve display
+            observation = self.observation.get("AIRS-CH0")
+            if not observation or not observation.is_loaded:
+                return
+        else:
+            # Single instrument loaded
+            observation = self.observation
+            if not observation.is_loaded:
+                return
+        
+        self.update_photometry_plot(observation)
+        self.update_detrended_plot(observation)
+        self.update_phase_folded_plot(observation)
     
-    def update_photometry_plot(self):
+    def update_photometry_plot(self, observation):
         self.single_lc_ax.clear()
-        if self.observation.light_curves is None: 
+        if observation.light_curves is None: 
             self.single_lc_canvas.draw()
             return
-        light_curves = self.observation.get_light_curves(return_type='numpy')
+        light_curves = observation.get_light_curves(return_type='numpy')
         config_wavelength_col = self.wavelength_slider.value()
         wavelength_col = self._convert_wavelength_index(config_wavelength_col, light_curves.shape[1])
         
-        self.single_lc_ax.plot(self.observation.get_time_array(), light_curves[:, wavelength_col], '.-', alpha=0.8, color='dodgerblue')
+        self.single_lc_ax.plot(observation.get_time_array(), light_curves[:, wavelength_col], '.-', alpha=0.8, color='dodgerblue')
         self.single_lc_ax.set_title(f"Raw Light Curve (Wavelength: {config_wavelength_col})")
         self.single_lc_ax.set_xlabel("Time (days)")
         self.single_lc_ax.set_ylabel("Flux")
         self.single_lc_ax.grid(True, alpha=0.3)
         self.single_lc_canvas.draw()
     
-    def update_detrended_plot(self):
+    def update_detrended_plot(self, observation):
         self.detrended_lc_ax.clear()
-        if self.observation.detrended_light_curves is None: 
+        if observation.detrended_light_curves is None: 
             self.detrended_lc_canvas.draw()
             return
-        detrended_lcs = self.observation.get_detrended_light_curves(return_type='numpy')
-        original_lcs = self.observation.get_light_curves(return_type='numpy')
-        noise_models = self.observation.get_noise_models(return_type='numpy')
+        detrended_lcs = observation.get_detrended_light_curves(return_type='numpy')
+        original_lcs = observation.get_light_curves(return_type='numpy')
+        noise_models = observation.get_noise_models(return_type='numpy')
         config_wavelength_col = self.wavelength_slider.value()
         wavelength_col = self._convert_wavelength_index(config_wavelength_col, detrended_lcs.shape[1])
         
-        time_arr = self.observation.get_time_array()
+        time_arr = observation.get_time_array()
         if self.zoom_checkbox.isChecked():
             self.detrended_lc_ax.plot(time_arr, detrended_lcs[:, wavelength_col], '.', color='black')
         else:
@@ -1982,15 +2127,15 @@ class DataInspector(QMainWindow):
         self.detrended_lc_ax.grid(True, alpha=0.3)
         self.detrended_lc_canvas.draw()
     
-    def update_phase_folded_plot(self):
+    def update_phase_folded_plot(self, observation):
         """Update the phase-folded plot with static scale based on overall data range."""
         self.phase_folded_ax.clear()
         
-        if self.observation.phase_folded_lc is None:
+        if observation.phase_folded_lc is None:
             self.phase_folded_canvas.draw()
             return
             
-        folded_data = self.observation.get_phase_folded_lc()
+        folded_data = observation.get_phase_folded_lc()
         config_wavelength_col = self.wavelength_slider.value()
         wavelength_col = self._convert_wavelength_index(config_wavelength_col, len(folded_data))
             
@@ -2087,51 +2232,94 @@ class DataInspector(QMainWindow):
         else:
             self.progress_bar.setValue(25)  # Final loading step
     
-    def _on_loading_finished(self, observation):
+    def _on_loading_finished(self, observations):
         """Handle completion of data loading."""
         try:
-            self.observation = observation
+            # Store observations based on type
+            if isinstance(observations, dict):
+                # Both instruments loaded
+                self.observation = observations  # Store as dict
+                self.current_instrument = "Both"
+                # Use the backend from the first observation (they should be the same)
+                first_obs = list(observations.values())[0]
+                self.current_backend = self.backend_combo.currentText()
+                
+                # Check if both observations have ground truth
+                airs_has_gt = observations["AIRS-CH0"].has_ground_truth()
+                fgs_has_gt = observations["FGS1"].has_ground_truth()
+                ground_truth_available = airs_has_gt or fgs_has_gt
+                
+                # Update UI controls - disable wavelength controls for "Both" mode
+                self.wavelength_slider.setEnabled(False)
+                self.wavelength_spinbox.setEnabled(False)
+                
+                # Update slider ranges based on AIRS-CH0 (more data points)
+                airs_obs = observations["AIRS-CH0"]
+                self.frame_slider.setRange(0, airs_obs.raw_signal.shape[0] - 1)
+                self.frame_spinbox.setRange(0, airs_obs.raw_signal.shape[0] - 1)
+                
+                # Set wavelength slider range based on AIRS-CH0 config
+                start_col, end_col = self._get_wavelength_range_for_instrument("AIRS-CH0")
+                if start_col == end_col == 0:
+                    max_wl = airs_obs.raw_signal.shape[2] - 1
+                    self.wavelength_slider.setRange(0, max_wl)
+                    self.wavelength_spinbox.setRange(0, max_wl)
+                else:
+                    self.wavelength_slider.setRange(start_col, end_col)
+                    self.wavelength_spinbox.setRange(start_col, end_col)
+                
+            else:
+                # Single instrument loaded
+                self.observation = observations
+                self.current_instrument = self.instrument_combo.currentText()
+                self.current_backend = self.backend_combo.currentText()
+                
+                # Update ground truth checkbox state based on observation
+                ground_truth_available = self.observation.has_ground_truth()
+                
+                # Update UI controls based on instrument
+                is_fgs = (self.current_instrument == 'FGS1')
+                self.wavelength_slider.setEnabled(not is_fgs)
+                self.wavelength_spinbox.setEnabled(not is_fgs)
+                
+                # Update slider ranges
+                self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1)
+                self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
+                
+                # Set wavelength slider range based on config
+                start_col, end_col = self._get_wavelength_range_for_instrument(self.current_instrument)
+                if start_col == end_col == 0:
+                    # Fallback to full range if not in config
+                    max_wl = self.observation.raw_signal.shape[2] - 1
+                    self.wavelength_slider.setRange(0, max_wl)
+                    self.wavelength_spinbox.setRange(0, max_wl)
+                else:
+                    # Use config range
+                    self.wavelength_slider.setRange(start_col, end_col)
+                    self.wavelength_spinbox.setRange(start_col, end_col)
             
-            # Track the backend used for loading
-            self.current_backend = self.backend_combo.currentText()
-            self.current_instrument = self.instrument_combo.currentText()
-            
-            # Update ground truth checkbox state based on observation
-            ground_truth_available = self.observation.has_ground_truth()
+            # Update ground truth checkbox state
             if hasattr(self, 'show_ground_truth_checkbox'):
                 self.show_ground_truth_checkbox.setEnabled(ground_truth_available)
                 self.show_ground_truth_checkbox.setChecked(ground_truth_available)
             
+            # Update baseline ground truth checkbox state
+            if hasattr(self, 'baseline_show_ground_truth_checkbox'):
+                self.baseline_show_ground_truth_checkbox.setEnabled(ground_truth_available)
+                self.baseline_show_ground_truth_checkbox.setChecked(ground_truth_available)
+            
             # Update star info display
             if self.star_info_df is not None and int(self.planet_combo.currentText()) in self.star_info_df.index:
                 self.info_display.setText(self.star_info_df.loc[int(self.planet_combo.currentText())].to_string())
-            
-            # Update UI controls based on instrument
-            is_fgs = (self.instrument_combo.currentText() == 'FGS1')
-            self.wavelength_slider.setEnabled(not is_fgs)
-            self.wavelength_spinbox.setEnabled(not is_fgs)
-            
-            # Update slider ranges
-            self.frame_slider.setRange(0, self.observation.raw_signal.shape[0] - 1)
-            self.frame_spinbox.setRange(0, self.observation.raw_signal.shape[0] - 1)
-            
-            # Set wavelength slider range based on config
-            start_col, end_col = self._get_wavelength_range_for_instrument(self.current_instrument)
-            if start_col == end_col == 0:
-                # Fallback to full range if not in config
-                max_wl = self.observation.raw_signal.shape[2] - 1
-                self.wavelength_slider.setRange(0, max_wl)
-                self.wavelength_spinbox.setRange(0, max_wl)
-            else:
-                # Use config range
-                self.wavelength_slider.setRange(start_col, end_col)
-                self.wavelength_spinbox.setRange(start_col, end_col)
             
             # Set UI to idle state
             self._set_ui_busy(False)
             
             # Update detrending options based on loaded instrument and backend
             self.update_detrending_options()
+            
+            # Update pipeline mode options based on instrument selection
+            self.update_pipeline_mode_options()
             
             # Lock navigation, unlock settings
             self._lock_navigation_panel()
@@ -2188,17 +2376,28 @@ class DataInspector(QMainWindow):
         if not planet_id: return
         planet_dir = DATASET_DIR / self.split_combo.currentText() / planet_id
         if not planet_dir.exists(): return
-        obs_ids = sorted([f.stem.split('_')[-1] for f in planet_dir.glob(f"{self.instrument_combo.currentText()}_signal_*.parquet") if f.stem.split('_')[-1].isdigit()], key=int)
+        
+        current_instrument = self.instrument_combo.currentText()
+        if current_instrument == "Both":
+            # For "Both", check for AIRS-CH0 signal files (more common)
+            obs_ids = sorted([f.stem.split('_')[-1] for f in planet_dir.glob(f"AIRS-CH0_signal_*.parquet") if f.stem.split('_')[-1].isdigit()], key=int)
+        else:
+            # For single instrument, check for that instrument's signal files
+            obs_ids = sorted([f.stem.split('_')[-1] for f in planet_dir.glob(f"{current_instrument}_signal_*.parquet") if f.stem.split('_')[-1].isdigit()], key=int)
+        
         if obs_ids: self.obs_combo.addItems(obs_ids)
         
         # Update wavelength controls based on instrument type
-        current_instrument = self.instrument_combo.currentText()
         is_fgs = (current_instrument == 'FGS1')
-        self.wavelength_slider.setEnabled(not is_fgs)
-        self.wavelength_spinbox.setEnabled(not is_fgs)
+        self.wavelength_slider.setEnabled(not is_fgs and current_instrument != "Both")
+        self.wavelength_spinbox.setEnabled(not is_fgs and current_instrument != "Both")
         
         # Set wavelength slider values based on config
-        start_col, end_col = self._get_wavelength_range_for_instrument(current_instrument)
+        if current_instrument == "Both":
+            # For "Both", use AIRS-CH0 config
+            start_col, end_col = self._get_wavelength_range_for_instrument("AIRS-CH0")
+        else:
+            start_col, end_col = self._get_wavelength_range_for_instrument(current_instrument)
         
         if is_fgs or start_col == end_col:
             # FGS1 or single wavelength: Set to start_col and disable
@@ -2515,10 +2714,12 @@ class DataInspector(QMainWindow):
         self.current_planet_id = None
         self.current_data_label.setText("Current Data: Instrument = None | Backend = None | Ground Truth: Not Available")
         
-        # Clear observation and Bayesian results
+        # Clear observation and results
         self.observation = None
         if hasattr(self, 'bayesian_results'):
             self.bayesian_results = None
+        if hasattr(self, 'baseline_results'):
+            self.baseline_results = None
         
         # Clear all plots
         self._clear_all_plots()
@@ -2590,6 +2791,8 @@ class DataInspector(QMainWindow):
             return "cnn"
         elif "Diffusion" in pipeline_name:
             return "diffusion"
+        elif "Baseline" in pipeline_name:
+            return "baseline"
         else:
             return "unknown"
     
@@ -2820,6 +3023,485 @@ class DataInspector(QMainWindow):
             boundary = "start" if new_index == 0 else "end"
             combo_name = combo_box.objectName() or 'combo'
             self.statusBar().showMessage(f"{combo_name} at {boundary} of list", 1500)
+
+    def update_pipeline_mode_options(self):
+        """Update pipeline mode options based on instrument selection."""
+        current_instrument = self.current_instrument if self.current_instrument else self.instrument_combo.currentText()
+        
+        # Store current selection if any
+        current_selection = self.pipeline_mode_combo.currentText()
+        
+        # Clear current options
+        self.pipeline_mode_combo.clear()
+        
+        if current_instrument == "Both":
+            # Only show Baseline Pipeline for both instruments
+            self.pipeline_mode_combo.addItems(["Baseline Pipeline"])
+            # Set to Baseline Pipeline
+            self.pipeline_mode_combo.setCurrentText("Baseline Pipeline")
+        else:
+            # Show all pipeline options for single instrument
+            self.pipeline_mode_combo.addItems(["Preprocessing Pipeline", "Bayesian Pipeline"])
+            # Restore previous selection if it was valid
+            if current_selection in ["Preprocessing Pipeline", "Bayesian Pipeline"]:
+                self.pipeline_mode_combo.setCurrentText(current_selection)
+            else:
+                self.pipeline_mode_combo.setCurrentText("Preprocessing Pipeline")
+        
+        # Trigger the change handler to update tab visibility
+        self.on_pipeline_mode_change(self.pipeline_mode_combo.currentText())
+
+class BaselinePlotter:
+    """Plotter for baseline pipeline results."""
+    
+    def __init__(self, ax, canvas):
+        self.ax = ax
+        self.canvas = canvas
+    
+    def plot_results(self, baseline_results, observation, show_uncertainties=True, 
+                    show_ground_truth=True, log_scale=False):
+        """Plot baseline pipeline results."""
+        if not baseline_results:
+            self.ax.clear()
+            self.ax.set_title("No Baseline Results Available")
+            self.ax.set_xlabel("Wavelength (μm)")
+            self.ax.set_ylabel("Transit Depth")
+            self.canvas.draw()
+            return
+        
+        self.ax.clear()
+        
+        # Extract results
+        predictions = baseline_results['predictions']
+        uncertainties = baseline_results['uncertainties']
+        
+        # Get wavelength array
+        if observation and observation.has_wavelengths():
+            wavelengths = observation.get_wavelengths()
+            print(f"DEBUG: Using observation wavelengths: {len(wavelengths)} points, range {wavelengths.min():.3f}-{wavelengths.max():.3f} μm")
+        else:
+            wavelengths = np.arange(len(predictions))
+            print(f"DEBUG: Using index-based wavelengths: {len(wavelengths)} points")
+        
+        # Plot predictions
+        print(f"DEBUG: Baseline predictions: {len(predictions)} points, range {predictions.min():.6f}-{predictions.max():.6f}")
+        self.ax.plot(wavelengths, predictions, 'b-', linewidth=2, alpha=0.8, label='Baseline Predictions')
+        
+        # Show uncertainties if requested
+        if show_uncertainties and uncertainties is not None:
+            self.ax.fill_between(wavelengths, 
+                               predictions - uncertainties, 
+                               predictions + uncertainties, 
+                               alpha=0.3, color='blue', label='±1σ Uncertainty')
+        
+        # Show ground truth if available and requested
+        if observation and observation.has_ground_truth() and show_ground_truth:
+            ground_truth = observation.get_ground_truth()
+            print(f"DEBUG: Ground truth: {len(ground_truth)} points, range {ground_truth.min():.6f}-{ground_truth.max():.6f}")
+            
+            # Use the same wavelength array for consistency
+            if len(wavelengths) >= len(ground_truth):
+                gt_wavelengths = wavelengths[:len(ground_truth)]
+            else:
+                ground_truth = ground_truth[:len(wavelengths)]
+                gt_wavelengths = wavelengths
+            
+            print(f"DEBUG: Ground truth wavelengths: {len(gt_wavelengths)} points, range {gt_wavelengths.min():.3f}-{gt_wavelengths.max():.3f} μm")
+            self.ax.plot(gt_wavelengths, ground_truth, 'r--', linewidth=3, alpha=0.9, label='Ground Truth')
+            
+            # Calculate and display metrics
+            metrics = self._calculate_metrics(predictions[:len(ground_truth)], ground_truth)
+            self._add_metrics_text(metrics)
+        
+        # Apply log scale if requested
+        if log_scale:
+            self.ax.set_yscale('log')
+            # Set reasonable log scale limits
+            all_values = np.concatenate([predictions, ground_truth if observation and observation.has_ground_truth() else []])
+            min_val = np.min(all_values[all_values > 0])  # Avoid log(0)
+            max_val = np.max(all_values)
+            self.ax.set_ylim(min_val * 0.5, max_val * 2)
+        
+        # Format the plot
+        self.ax.set_title("Baseline Pipeline Results")
+        if observation and observation.has_wavelengths():
+            self.ax.set_xlabel("Wavelength (μm)")
+        else:
+            self.ax.set_xlabel("Wavelength Index")
+        self.ax.set_ylabel("Transit Depth")
+        self.ax.legend()
+        self.ax.grid(True, alpha=0.3)
+        
+        # Add pipeline info
+        if 'pipeline_params' in baseline_results:
+            pipeline_params = baseline_results['pipeline_params']
+            info_text = "Pipeline Info:\n"
+            info_text += f"  Instrument: {pipeline_params.get('instrument', 'Unknown')}\n"
+            info_text += f"  Scale: {pipeline_params.get('scale', 0.95):.3f}\n"
+            info_text += f"  Sigma: {pipeline_params.get('sigma', 0.0009):.6f}\n"
+            info_text += f"  Optimized Depth: {baseline_results.get('optimized_transit_depth', 0):.6f}"
+            self.ax.text(0.02, 0.98, info_text, transform=self.ax.transAxes, 
+                        verticalalignment='top', fontsize=8, 
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        self.canvas.draw()
+    
+    def _calculate_metrics(self, predictions, ground_truth):
+        """Calculate metrics between predictions and ground truth."""
+        if len(predictions) != len(ground_truth):
+            return {}
+        
+        predictions = np.array(predictions)
+        ground_truth = np.array(ground_truth)
+        
+        # Calculate metrics
+        mse = np.mean((predictions - ground_truth) ** 2)
+        rms_error = np.sqrt(mse)
+        mae = np.mean(np.abs(predictions - ground_truth))
+        
+        # Calculate correlation coefficient
+        if len(predictions) > 1:
+            correlation = np.corrcoef(predictions, ground_truth)[0, 1]
+        else:
+            correlation = 1.0 if predictions[0] == ground_truth[0] else 0.0
+        
+        return {
+            'rms_error': rms_error,
+            'mae': mae,
+            'correlation': correlation
+        }
+    
+    def _add_metrics_text(self, metrics):
+        """Add metrics text to the plot."""
+        if not metrics:
+            return
+        
+        metrics_text = f"Metrics:\n"
+        metrics_text += f"RMSE: {metrics['rms_error']:.4f}\n"
+        metrics_text += f"MAE: {metrics['mae']:.4f}\n"
+        metrics_text += f"R²: {metrics['correlation']:.4f}"
+        
+        self.ax.text(0.02, 0.02, metrics_text, transform=self.ax.transAxes, 
+                    verticalalignment='bottom', fontsize=9, 
+                    bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+
+    def run_baseline_pipeline(self):
+        """Run the baseline pipeline."""
+        if not self.observation:
+            self.statusBar().showMessage("Please load data first.", 5000)
+            return
+        
+        # Check backend compatibility
+        selected_backend = self.backend_combo.currentText()
+        if self.current_backend and self.current_backend != selected_backend:
+            self.statusBar().showMessage(
+                f"Backend mismatch! Data loaded on {self.current_backend}, but {selected_backend} selected. "
+                "Please reload data with the correct backend.", 10000
+            )
+            return
+        
+        # Set UI to busy state
+        self._set_ui_busy(True, "baseline_pipeline")
+        
+        # Get pipeline parameters
+        pipeline_params = {
+            'instrument': self.current_instrument,
+            'use_gpu': self.current_backend == 'gpu',
+            'scale': 0.95,  # Default baseline parameters
+            'sigma': 0.0009,
+            'cut_inf': 39,
+            'cut_sup': 321,
+            'binning': 30,
+            'phase_detection_slice': (30, 140),  # Tuple instead of slice for serialization
+            'optimization_delta': 7,
+            'polynomial_degree': 3
+        }
+        
+        # Run baseline pipeline asynchronously
+        self._run_baseline_pipeline_async(pipeline_params)
+    
+    def _run_baseline_pipeline_async(self, pipeline_params):
+        """Run baseline pipeline asynchronously with progress tracking."""
+        # Create and start worker
+        self.baseline_worker = BaselinePipelineWorker(self.observation, pipeline_params)
+        self.baseline_worker.progress_signal.connect(self._on_baseline_pipeline_progress)
+        self.baseline_worker.finished_signal.connect(self._on_baseline_pipeline_finished)
+        self.baseline_worker.error_signal.connect(self._on_baseline_pipeline_error)
+        self.baseline_worker.start()
+    
+    def _on_baseline_pipeline_progress(self, message: str):
+        """Handle progress updates from the baseline pipeline worker."""
+        # Update progress label
+        self.progress_label.setText(message)
+        
+        # Update status bar
+        self.statusBar().showMessage(message, 1000)
+        
+        # Update progress bar
+        if "preprocessing" in message.lower():
+            self.progress_bar.setValue(30)
+        elif "phase detection" in message.lower():
+            self.progress_bar.setValue(60)
+        elif "optimization" in message.lower():
+            self.progress_bar.setValue(80)
+    
+    def _on_baseline_pipeline_finished(self, results):
+        """Handle completion of the baseline pipeline."""
+        try:
+            # Update progress for plotting
+            self.progress_bar.setValue(95)
+            self.progress_label.setText("Updating plots...")
+            
+            # Store results
+            self.baseline_results = results
+            
+            # Update baseline plots
+            self.update_baseline_plot()
+            
+            # Complete
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("Baseline Pipeline completed")
+            
+            # Set UI to idle state
+            self._set_ui_busy(False)
+            
+            self.statusBar().showMessage("Baseline Pipeline finished.", 5000)
+            
+        except Exception as e:
+            self._on_baseline_pipeline_error(str(e))
+        finally:
+            # Clean up worker
+            if hasattr(self, 'baseline_worker') and self.baseline_worker:
+                self.baseline_worker.deleteLater()
+                self.baseline_worker = None
+    
+    def _on_baseline_pipeline_error(self, error_message: str):
+        """Handle errors during baseline pipeline execution."""
+        # Set UI to idle state
+        self._set_ui_busy(False)
+        
+        # Show error (but not for user stops)
+        if "stopped by user" not in error_message.lower():
+            self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
+            print(f"ERROR: {error_message}")
+        else:
+            self.statusBar().showMessage("Baseline Pipeline stopped by user", 5000)
+        
+        # Clean up worker
+        if hasattr(self, 'baseline_worker') and self.baseline_worker:
+            self.baseline_worker.deleteLater()
+            self.baseline_worker = None
+
+    def update_baseline_plot(self):
+        """Update the baseline results plot using the baseline plotter."""
+        # Get checkbox states
+        show_uncertainties = self.baseline_show_uncertainties_checkbox.isChecked()
+        show_ground_truth = self.baseline_show_ground_truth_checkbox.isChecked()
+        log_scale = self.baseline_log_scale_checkbox.isChecked()
+        
+        # Get the appropriate observation for ground truth
+        observation = None
+        if isinstance(self.observation, dict):
+            # Both instruments loaded - use AIRS-CH0 for ground truth (more wavelengths)
+            observation = self.observation.get("AIRS-CH0")
+        else:
+            # Single instrument loaded
+            observation = self.observation
+        
+        # Use the baseline plotter to handle the visualization
+        self.baseline_plotter.plot_results(
+            baseline_results=getattr(self, 'baseline_results', None),
+            observation=observation,
+            show_uncertainties=show_uncertainties,
+            show_ground_truth=show_ground_truth,
+            log_scale=log_scale
+        )
+
+    def update_components_plot(self):
+        """Update the component analysis plot."""
+        if not hasattr(self, 'bayesian_results') or self.bayesian_results is None:
+            # Clear all subplots
+            for ax in self.components_ax:
+                ax.clear()
+                ax.set_title("No Data")
+            self.components_canvas.draw()
+            return
+        
+        # Check if we have fitted components
+        if 'fitted_components' not in self.bayesian_results:
+            # Clear all subplots and show message
+            for ax in self.components_ax:
+                ax.clear()
+                ax.set_title("No Component Data")
+            self.components_canvas.draw()
+            return
+        
+        fitted_components = self.bayesian_results['fitted_components']
+        
+        # Plot each component in a separate subplot
+        component_names = list(fitted_components.keys())
+        for i, ax in enumerate(self.components_ax):
+            ax.clear()
+            
+            if i < len(component_names):
+                component_name = component_names[i]
+                component_data = fitted_components[component_name]
+                
+                # Plot the component data
+                if component_data is not None and len(component_data) > 0:
+                    if component_name == 'stellar':
+                        # Stellar spectrum: plot as wavelength-dependent
+                        wavelengths = np.arange(len(component_data))
+                        ax.plot(wavelengths, component_data, 'r-', linewidth=2)
+                        ax.set_title(f"Stellar Spectrum")
+                        ax.set_xlabel("Wavelength Index")
+                        ax.set_ylabel("Flux")
+                    elif component_name == 'drift':
+                        # Drift model: plot as time series for first wavelength
+                        if len(component_data.shape) > 1:
+                            # Multi-wavelength drift, show first wavelength
+                            time_points = np.arange(component_data.shape[0])
+                            ax.plot(time_points, component_data[:, 0], 'g-', linewidth=2)
+                            ax.set_title(f"Drift Model (Wavelength 0)")
+                            ax.set_xlabel("Time Index")
+                            ax.set_ylabel("Drift Factor")
+                        else:
+                            # Single wavelength drift
+                            time_points = np.arange(len(component_data))
+                            ax.plot(time_points, component_data, 'g-', linewidth=2)
+                            ax.set_title(f"Drift Model")
+                            ax.set_xlabel("Time Index")
+                            ax.set_ylabel("Drift Factor")
+                    elif component_name == 'transit_depth':
+                        # Transit depths: plot as wavelength-dependent
+                        wavelengths = np.arange(len(component_data))
+                        ax.plot(wavelengths, component_data, 'b-', linewidth=2)
+                        ax.set_title(f"Transit Depth Variation")
+                        ax.set_xlabel("Wavelength Index")
+                        ax.set_ylabel("Transit Depth")
+                    elif component_name == 'transit_window':
+                        # Transit window: plot as time series
+                        time_points = np.arange(len(component_data))
+                        ax.plot(time_points, component_data, 'purple', linewidth=2)
+                        ax.set_title(f"Transit Window")
+                        ax.set_xlabel("Time Index")
+                        ax.set_ylabel("Transit Window")
+                    elif component_name == 'noise':
+                        # Noise levels: plot as wavelength-dependent
+                        wavelengths = np.arange(len(component_data))
+                        ax.plot(wavelengths, component_data, 'orange', linewidth=2)
+                        ax.set_title(f"Noise Levels")
+                        ax.set_xlabel("Wavelength Index")
+                        ax.set_ylabel("Noise Level")
+                    else:
+                        # Generic component plotting
+                        data_points = np.arange(len(component_data))
+                        ax.plot(data_points, component_data, 'k-', linewidth=2)
+                        ax.set_title(f"{component_name.replace('_', ' ').title()}")
+                        ax.set_xlabel("Index")
+                        ax.set_ylabel("Value")
+                    
+                    ax.grid(True, alpha=0.3)
+                else:
+                    ax.set_title(f"{component_name.replace('_', ' ').title()}")
+                    ax.text(0.5, 0.5, "No data available", 
+                           transform=ax.transAxes, ha='center', va='center', fontsize=10,
+                           bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+            else:
+                ax.set_title("No Component")
+                ax.text(0.5, 0.5, "No component data", 
+                       transform=ax.transAxes, ha='center', va='center', fontsize=10,
+                       bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        
+        self.components_canvas.figure.tight_layout()
+        self.components_canvas.draw()
+
+class BaselinePipelineWorker(QThread):
+    """Worker thread for running the baseline pipeline asynchronously."""
+    
+    progress_signal = pyqtSignal(str)  # Simple string messages for pipeline steps
+    finished_signal = pyqtSignal(object)  # Emit the pipeline results
+    error_signal = pyqtSignal(str)
+    
+    def __init__(self, observation, pipeline_params):
+        super().__init__()
+        self.observation = observation
+        self.pipeline_params = pipeline_params
+        self._should_stop = False
+    
+    def run(self):
+        """Run the baseline pipeline in a separate thread."""
+        try:
+            print("DEBUG: Starting baseline pipeline in worker thread")
+            
+            # Import baseline pipeline
+            from arielml.pipelines.baseline_pipeline import BaselinePipeline
+            
+            # Create baseline pipeline
+            self.progress_signal.emit("Creating baseline pipeline...")
+            self.check_stop()
+            
+            pipeline = BaselinePipeline(**self.pipeline_params)
+            
+            # Handle both single and multiple observations
+            if isinstance(self.observation, dict):
+                # Both instruments loaded
+                self.progress_signal.emit("Processing both instruments...")
+                self.check_stop()
+                
+                # Fit the pipeline with both observations
+                pipeline.fit(self.observation)
+                
+                # Make predictions
+                self.progress_signal.emit("Making predictions...")
+                self.check_stop()
+                
+                predictions, uncertainties = pipeline.predict(self.observation)
+                
+            else:
+                # Single instrument loaded
+                self.progress_signal.emit("Processing single instrument...")
+                self.check_stop()
+                
+                # Fit the pipeline
+                pipeline.fit(self.observation)
+                
+                # Make predictions
+                self.progress_signal.emit("Making predictions...")
+                self.check_stop()
+                
+                predictions, uncertainties = pipeline.predict(self.observation)
+            
+            # Store results
+            results = {
+                'predictions': predictions,
+                'uncertainties': uncertainties,
+                'pipeline_params': self.pipeline_params,
+                'optimized_transit_depth': getattr(pipeline, 'optimized_transit_depth', None)
+            }
+            
+            # Final check before emitting success
+            self.check_stop()
+            
+            print("DEBUG: Baseline pipeline completed successfully")
+            self.finished_signal.emit(results)
+            
+        except InterruptedError:
+            print("DEBUG: Baseline pipeline interrupted by user")
+            # Operation was stopped by user - don't emit error
+            pass
+        except Exception as e:
+            print(f"DEBUG: Baseline pipeline error: {e}")
+            self.error_signal.emit(str(e))
+    
+    def check_stop(self):
+        """Check if a stop has been requested."""
+        if self._should_stop:
+            raise InterruptedError("Baseline pipeline stopped by user")
+    
+    def stop(self):
+        """Request the worker to stop."""
+        self._should_stop = True
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
