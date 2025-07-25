@@ -1,4 +1,5 @@
 import sys
+import traceback
 from pathlib import Path
 
 # Add the project root to the Python path to allow importing 'arielml'
@@ -356,6 +357,9 @@ class DataLoadingWorker(QThread):
             # Operation was stopped by user - don't emit error
             pass
         except Exception as e:
+            print(f"ERROR in DataLoadingWorker: {e}")
+            print("Full stack trace:")
+            traceback.print_exc()
             self.error_signal.emit(str(e))
     
     def check_stop(self):
@@ -527,7 +531,9 @@ class BayesianPipelineWorker(QThread):
             # Operation was stopped by user - don't emit error
             pass
         except Exception as e:
-            print(f"DEBUG: Bayesian pipeline error: {e}")
+            print(f"ERROR in BayesianPipelineWorker: {e}")
+            print("Full stack trace:")
+            traceback.print_exc()
             self.error_signal.emit(str(e))
         finally:
             # Ensure GPU cleanup even if there's an error
@@ -642,7 +648,9 @@ class PipelineWorker(QThread):
             # Operation was stopped by user - don't emit error
             pass
         except Exception as e:
-            print(f"DEBUG: Pipeline error: {e}")
+            print(f"ERROR in PipelineWorker: {e}")
+            print("Full stack trace:")
+            traceback.print_exc()
             self.error_signal.emit(str(e))
     
     def _on_detrending_progress(self, progress):
@@ -1540,7 +1548,8 @@ class DataInspector(QMainWindow):
         # Show error (but not for user stops)
         if "stopped by user" not in error_message.lower():
             self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
-            print(f"ERROR: {error_message}")
+            print(f"ERROR in pipeline: {error_message}")
+            print("Note: Full stack trace was printed above")
         else:
             self.statusBar().showMessage("Pipeline stopped by user", 5000)
         
@@ -1618,7 +1627,8 @@ class DataInspector(QMainWindow):
         # Show error (but not for user stops)
         if "stopped by user" not in error_message.lower():
             self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
-            print(f"ERROR: {error_message}")
+            print(f"ERROR in detrending: {error_message}")
+            print("Note: Full stack trace was printed above")
         else:
             self.statusBar().showMessage("Pipeline stopped by user", 5000)
         
@@ -2353,7 +2363,8 @@ class DataInspector(QMainWindow):
         # Show error (but not for user stops)
         if "stopped by user" not in error_message.lower():
             self.statusBar().showMessage(f"Error loading data: {error_message}", 15000)
-            print(f"ERROR: {error_message}")
+            print(f"ERROR in data loading: {error_message}")
+            print("Note: Full stack trace was printed above")
         else:
             self.statusBar().showMessage("Data loading stopped by user", 5000)
         
@@ -2500,7 +2511,7 @@ class DataInspector(QMainWindow):
             self.settings_tabs.setTabVisible(self.detrending_tab_index, True)
             self.settings_tabs.setTabVisible(self.bayesian_tab_index, False)
             self.pipeline_button.setText("Apply Changes & Rerun Pipeline")
-            self.pipeline_button.setEnabled(self.observation is not None and self.observation.is_loaded)
+            self.pipeline_button.setEnabled(self.observation is not None)
             print(f"DEBUG: Set button text to: {self.pipeline_button.text()}")
             
             # Update preprocessing plots to ensure they're visible
@@ -2670,7 +2681,8 @@ class DataInspector(QMainWindow):
         # Show error (but not for user stops)
         if "stopped by user" not in error_message.lower():
             self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
-            print(f"ERROR: {error_message}")
+            print(f"ERROR in Bayesian pipeline: {error_message}")
+            print("Note: Full stack trace was printed above")
         else:
             self.statusBar().showMessage("Bayesian Pipeline stopped by user", 5000)
         
@@ -3308,7 +3320,8 @@ class BaselinePlotter:
         # Show error (but not for user stops)
         if "stopped by user" not in error_message.lower():
             self.statusBar().showMessage(f"ERROR: {error_message}", 15000)
-            print(f"ERROR: {error_message}")
+            print(f"ERROR in baseline pipeline: {error_message}")
+            print("Note: Full stack trace was printed above")
         else:
             self.statusBar().showMessage("Baseline Pipeline stopped by user", 5000)
         
@@ -3491,7 +3504,9 @@ class BaselinePipelineWorker(QThread):
             # Operation was stopped by user - don't emit error
             pass
         except Exception as e:
-            print(f"DEBUG: Baseline pipeline error: {e}")
+            print(f"ERROR in BaselinePipelineWorker: {e}")
+            print("Full stack trace:")
+            traceback.print_exc()
             self.error_signal.emit(str(e))
     
     def check_stop(self):
