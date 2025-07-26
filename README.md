@@ -9,6 +9,7 @@ This project provides a comprehensive, high-performance Python pipeline for anal
 * **Modular Library (`arielml`):** All core logic is encapsulated in a clean, scalable, and installable Python library.
 * **High-Performance Backend:** A backend-agnostic design allows all numerical operations to run seamlessly on either a **CPU (NumPy)** or a **GPU (CuPy)** for maximum performance.
 * **End-to-End Data Reduction:** Implements the full pipeline from raw data to clean, phase-folded light curves, including robust calibration, photometry, and detrending.
+* **Dual-Instrument Support:** The baseline pipeline processes both FGS1 and AIRS-CH0 instruments simultaneously for comprehensive transit analysis.
 * **Advanced Detrending Framework:**
     * Includes baseline Polynomial and Savitzky-Golay models.
     * Features per-wavelength Gaussian Process (GP) models for both **CPU (`george`)** and **GPU (`gpytorch`)**.
@@ -102,6 +103,7 @@ This will launch the GUI (shown in the screenshot above), allowing you to load p
 - **📊 Interactive Visualization**: Real-time plotting with mouse-over coordinates
 - **⚙️ Parameter Tuning**: Adjust pipeline parameters and see immediate results
 - **🔄 Pipeline Comparison**: Switch between Preprocessing, Baseline, and Bayesian pipelines
+  - *Note: Baseline pipeline requires both FGS1 and AIRS-CH0 instruments loaded*
 - **📈 Multi-tab Analysis**: Separate tabs for different types of visualizations
 - **🎚️ Transit Fit Analysis**: Wavelength-specific transit depth exploration
 - **💾 Memory Management**: Efficient handling of large datasets
