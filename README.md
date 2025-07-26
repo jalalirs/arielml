@@ -1,5 +1,7 @@
 # ArielML: Exoplanet Data Analysis Pipeline
 
+![ArielML Data Inspector](assets/data_inspector_screenshot.png)
+
 This project provides a comprehensive, high-performance Python pipeline for analyzing simulated data from the ESA Ariel Space Telescope, as part of the "Ariel Data Challenge 2025". The primary goal is to process raw time-series image data to recover the atmospheric transmission spectra of exoplanets.
 
 ## ✨ Features
@@ -31,6 +33,8 @@ The project is organized into a clean and logical directory structure:
 │   │   ├── observation.py
 │   │   └── photometry.py
 │   └── ...
+├── assets/             # Screenshots and media files
+│   └── data_inspector_screenshot.png
 ├── dataset/            # Target directory for raw competition data
 │   └── .gitkeep
 ├── notebooks/          # Jupyter notebooks for experimentation
@@ -50,8 +54,8 @@ Follow these steps to set up the project environment.
 **1. Clone the Repository:**
 
 ```bash
-git clone <your-repository-url>
-cd <repository-name>
+git clone https://github.com/jalalirs/arielml
+cd arielml
 ```
 
 **2. Create a Virtual Environment:**
@@ -92,7 +96,15 @@ The primary tool for visualization and debugging is the `Data Inspector`. To run
 python tools/data_inspector.py
 ```
 
-This will launch the GUI, allowing you to load planet data, apply calibration steps, and interactively compare all detrending models (including the CPU, GPU, and Hybrid GP options) to visualize the final phase-folded transit signal.
+This will launch the GUI (shown in the screenshot above), allowing you to load planet data, apply calibration steps, and interactively compare all detrending models (including the CPU, GPU, and Hybrid GP options) to visualize the final phase-folded transit signal.
+
+#### Key Features of the Data Inspector:
+- **📊 Interactive Visualization**: Real-time plotting with mouse-over coordinates
+- **⚙️ Parameter Tuning**: Adjust pipeline parameters and see immediate results
+- **🔄 Pipeline Comparison**: Switch between Preprocessing, Baseline, and Bayesian pipelines
+- **📈 Multi-tab Analysis**: Separate tabs for different types of visualizations
+- **🎚️ Transit Fit Analysis**: Wavelength-specific transit depth exploration
+- **💾 Memory Management**: Efficient handling of large datasets
 
 ## 🔮 Next Steps
 

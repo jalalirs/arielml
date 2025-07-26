@@ -1,0 +1,49 @@
+# Baseline Pipeline Configuration
+# This configuration runs the baseline pipeline with default parameters
+
+name: "Baseline Pipeline - Default Settings"
+description: "Standard baseline pipeline with optimized parameters from the notebook"
+
+# Data configuration
+data:
+  # Option 1: Specify planet IDs directly
+  # planet_ids: [104891231, 1304336843, 1348336843]
+  
+  # Option 2: Load from CSV file (recommended for large datasets)
+  planet_id_file: "dataset/train_star_info.csv"  # Adjust path as needed
+  
+  # Data loading parameters
+  instruments: ["AIRS-CH0", "FGS1"]  # Both instruments
+  split: "test"  # or "train" for training data
+  obs_id: 0
+  backend: "gpu"  # "numpy", "gpu", or "cupy"
+
+# Pipeline configuration
+pipeline:
+  type: "baseline"  # baseline or bayesian
+  
+  parameters:
+    # Core parameters (from the baseline notebook)
+    instrument: "AIRS-CH0"  # Primary instrument for optimization
+    use_gpu: true
+    scale: 0.95
+    sigma: 0.0009
+    
+    # Wavelength cutting (AIRS-CH0 specific)
+    cut_inf: 39
+    cut_sup: 250
+    
+    # Time binning
+    binning: 30
+    
+    # Phase detection
+    phase_detection_slice: [30, 140]  # slice(30, 140)
+    
+    # Optimization parameters
+    optimization_delta: 7
+    polynomial_degree: 3
+
+# Output configuration
+output:
+  validate_format: true
+  save_intermediate_results: false 

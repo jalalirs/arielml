@@ -1,0 +1,42 @@
+# Baseline Pipeline Configuration - High Precision
+# This configuration runs the baseline pipeline with parameters optimized for precision
+
+name: "Baseline Pipeline - High Precision"
+description: "Baseline pipeline with smaller sigma and more conservative parameters"
+
+# Data configuration
+data:
+  planet_id_file: "dataset/train_star_info.csv"
+  instruments: ["AIRS-CH0", "FGS1"]
+  split: "train"
+  obs_id: 0
+  backend: "gpu"
+
+# Pipeline configuration
+pipeline:
+  type: "baseline"
+  
+  parameters:
+    instrument: "AIRS-CH0"
+    use_gpu: true
+    scale: 0.98  # Higher scale for more conservative estimates
+    sigma: 0.0005  # Lower sigma for higher precision claims
+    
+    # Wavelength cutting
+    cut_inf: 39
+    cut_sup: 250
+    
+    # Time binning
+    binning: 30
+    
+    # Phase detection - narrower window for better precision
+    phase_detection_slice: [40, 130]
+    
+    # Optimization parameters
+    optimization_delta: 5  # Smaller delta for more precise fitting
+    polynomial_degree: 4  # Higher degree for better fit
+
+# Output configuration
+output:
+  validate_format: true
+  save_intermediate_results: false 

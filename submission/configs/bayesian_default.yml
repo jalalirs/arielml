@@ -1,0 +1,53 @@
+# Bayesian Pipeline Configuration
+# This configuration runs the Bayesian pipeline with MCMC sampling
+
+name: "Bayesian Pipeline - Default Settings"
+description: "Bayesian pipeline with MCMC sampling for uncertainty quantification"
+
+# Data configuration
+data:
+  planet_id_file: "dataset/test_star_info.csv"
+  instruments: ["AIRS-CH0", "FGS1"]
+  split: "test"
+  obs_id: 0
+  backend: "gpu"
+
+# Pipeline configuration
+pipeline:
+  type: "bayesian"
+  
+  parameters:
+    # Core parameters
+    instrument: "AIRS-CH0"
+    use_gpu: true
+    
+    # Detrending model configuration
+    detrending_model: "AIRSDriftDetrender"  # or other available models
+    
+    # MCMC sampling parameters
+    n_samples: 1000
+    n_burn: 500
+    n_chains: 4
+    
+    # Prior parameters
+    transit_depth_prior_mean: 0.001
+    transit_depth_prior_std: 0.01
+    
+    # Noise model parameters
+    noise_model: "WhiteNoise"  # or "RedNoise"
+    
+    # Calibration parameters
+    apply_calibration: true
+    calibration_steps: [
+      "adc_conversion",
+      "mask_hot_dead_pixels", 
+      "linearity_correction",
+      "dark_current_subtraction",
+      "correlated_double_sampling",
+      "flat_field_correction"
+    ]
+
+# Output configuration
+output:
+  validate_format: true
+  save_intermediate_results: true  # Save MCMC chains for analysis 

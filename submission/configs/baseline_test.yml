@@ -1,0 +1,46 @@
+# Baseline Pipeline Configuration - Test with few planets
+# This configuration runs the baseline pipeline on a small subset for testing
+
+name: "Baseline Pipeline - Test"
+description: "Test baseline pipeline with a small subset of planets"
+
+# Data configuration
+data:
+  # Test with just a few planets
+  planet_ids: [104891231, 1304336843, 1348336843]
+  
+  # Data loading parameters
+  instruments: ["AIRS-CH0", "FGS1"]  # Both instruments
+  split: "test"  # or "train" for training data
+  obs_id: 0
+  backend: "gpu"  # "numpy", "gpu", or "cupy"
+
+# Pipeline configuration
+pipeline:
+  type: "baseline"  # baseline or bayesian
+  
+  parameters:
+    # Core parameters (from the baseline notebook)
+    instrument: "AIRS-CH0"  # Primary instrument for optimization
+    use_gpu: true
+    scale: 0.95
+    sigma: 0.0009
+    
+    # Wavelength cutting (AIRS-CH0 specific)
+    cut_inf: 39
+    cut_sup: 250
+    
+    # Time binning
+    binning: 30
+    
+    # Phase detection
+    phase_detection_slice: [30, 140]  # slice(30, 140)
+    
+    # Optimization parameters
+    optimization_delta: 7
+    polynomial_degree: 3
+
+# Output configuration
+output:
+  validate_format: true
+  save_intermediate_results: false 
